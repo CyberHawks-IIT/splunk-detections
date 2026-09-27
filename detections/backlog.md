@@ -20,6 +20,7 @@ category table below.
 |---|---|---|---|
 | Ping Sweep | 2026-09-27 | [reconnaissance/ping_sweep.yml](reconnaissance/ping_sweep.yml) | Live `nmap -sn` sweep from john-kali against all 7 range hosts, fired exactly once, no false positives over 1h |
 | Port Scan | 2026-09-27 | [reconnaissance/port_scan.yml](reconnaissance/port_scan.yml) | Live `nmap -p 445` sweep + `nmap -p 1-1000` single-host scan from john-kali, each fired exactly once; needed scoping to the range subnet + an NTP exclusion to kill false positives |
+| Relayed SMB or LDAP connection | 2026-09-27 | [ntlm-relay-coercion/relayed_smb_or_ldap.yml](ntlm-relay-coercion/relayed_smb_or_ldap.yml) | Live Responder+ntlmrelayx relay (HTTP trigger -> LDAP on dc1) from the `test` box; baseline NTLM frequency investigated first (zero in 3h+ of idle range operation) — needed an exclusion for this control host's own admin traffic (NAT'd to the gateway IP, 10.0.2.1) |
 
 ## Zeek logs actually needed
 
@@ -77,7 +78,6 @@ simply won't arrive in Splunk.
 | Detection | Log source | Status |
 |---|---|---|
 | Coercion trigger (PetitPotam / DFSCoerce / ShadowCoerce / PrinterBug) | Sysmon — Events 17/18 (named pipe created/connected) on the DC, filtered to `\PIPE\efsrpc` and `\PIPE\lsarpc` (MS-EFSR/PetitPotam — it binds over either pipe), `\PIPE\netdfs` (MS-DFSNM/DFSCoerce), `\PIPE\FssagentRpc` (MS-FSRVP/ShadowCoerce), and `\PIPE\spoolss` (MS-RPRN/PrinterBug — the same Print Spooler primitive already used elsewhere in the range for the delegation and ESC8 scenarios). Host-side, so it doesn't go dark under SMB-encrypted named-pipe traffic the way a network-based version would. | ready |
-| Relayed SMB or LDAP connection | Windows Events — 4624 at the target, `Authentication Package Name = NTLM`, for either a user or a computer principal (a relay victim can be either — poisoning captures a user's hash, coercion captures a computer's). Kerberos is this domain's default/preferred protocol when both sides support it, so NTLM at all is already a weaker signal on its own — flag it specifically when `SourceNetworkAddress` isn't one of the range's known domain-joined host IPs, since every legitimate host here has a fixed, known IP. | ready |
 | Attacker-added DNS record | Windows Events — 5137 (directory service object created, DNS zone partition) | ready |
 
 ## SQL Server
