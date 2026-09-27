@@ -26,6 +26,8 @@ category table below.
 | DPAPI masterkey / credential file theft | 2026-09-27 | [credential-dumping/dpapi_dump.yml](credential-dumping/dpapi_dump.yml) | Live masterkey + credential-blob file reads on workstation, fired exactly once, no false positives over 4h — worked as originally designed |
 | ASREPRoast | 2026-09-27 | [weak-auth/asreproast.yml](weak-auth/asreproast.yml) | Named "AS-REP Roast" per the Alert Embed Planner. Live `impacket-GetNPUsers` against asmith (the range's dedicated no-preauth account) from john-kali, fired exactly once (2 4768s 11ms apart merged by a 1m bucket); worked as originally designed, no infra fix needed — confirmed zero Pre-Authentication-Type=0 events in 24h of background traffic beforehand |
 | Kerberoast | 2026-09-27 | [weak-auth/kerberoast.yml](weak-auth/kerberoast.yml) | Live `impacket-GetUserSPNs` against both real user-SPN accounts (crackme, svc-mssql) using asmith's cracked password, fired exactly once. Needed a real fix mid-design: filtering by the *requesting* account (`NOT Account_Name="*$@*"`) still false-positived on a human admin's normal logon triggering machine-account service tickets — switched to filtering by the *target* Service_Name (`NOT Service_Name="*$"`) instead, since machine accounts requesting tickets to each other is the actual baseline noise pattern, not who's asking |
+| Zone transfer (AXFR) | 2026-09-27 | [weak-auth/zone_transfer.yml](weak-auth/zone_transfer.yml) | Live `dig axfr cyberhawks.lab @10.0.2.2` (dc1's real IP — a prior memory snapshot had this wrong as 10.0.2.4), full unauthenticated zone dump retrieved, fired exactly once, worked as originally designed |
+| Password spray / guessable password | 2026-09-27 | [weak-auth/password_spray.yml](weak-auth/password_spray.yml) | Live `netexec smb` (NTLM vector) and `kerbrute passwordspray` (Kerberos vector), both against a 20-name wordlist with the real weak-cred pool password `Summer2026`, each fired exactly once. Needed an exclusion for netexec's own ANONYMOUS LOGON null-session probe. **Documented, not fixed:** asmith (the no-preauth account) always shows as a false "success" for any Kerberos-vector spray that includes it, since a no-preauth account's AS-REQ always looks successful regardless of the guessed password |
 
 ## Zeek logs actually needed
 
@@ -70,11 +72,9 @@ simply won't arrive in Splunk.
 
 | Detection | Log source | Status |
 |---|---|---|
-| Password spray / guessable password | Windows Events — 4771 + 4625 | ready |
 | Pre-2000 / blank password | Windows Events — 4624 | ready |
 | Anonymous logon / null session | Zeek `dce_rpc.log` — the specific enumeration calls an anonymous/null session actually enables: MS-LSAT `LsarLookupSids` and MS-SAMR `SamrEnumerateUsersInDomain` (mirroring what NetExec's `--users`/`--groups`/trust-enumeration switches call), plus their group and trust equivalents; correlate to the target's 4624 anonymous logon for session context | ready |
 | NetNTLMv1 permitted | Windows Events — 4624, the `Package Name (NTLM only)` field = `NTLM V1` (corrected from an earlier draft that referenced 8004, which doesn't reliably break out NTLM version) | ready |
-| Zone transfer (AXFR) | Zeek — `dns.log` | ready |
 
 ## NTLM relay & coercion
 

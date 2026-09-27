@@ -1,0 +1,52 @@
+name: Zone Transfer
+id: weak-auth-zone-transfer
+version: 1
+date: '2026-09-27'
+status: production
+category: weak-auth
+description: >-
+  An unauthenticated DNS zone transfer (AXFR) against a domain controller.
+  dc1's `cyberhawks.lab` zone is misconfigured with
+  `SecureSecondaries=TransferAnyServer`, so any client can dump the entire
+  zone (every A/SRV/NS record) with a single `dig axfr` -- no legitimate
+  client in this domain ever issues an AXFR query (AD-integrated zone data
+  replicates via normal AD replication between dc1/dc2, not classic
+  zone-transfer), so any AXFR request at all is the signal.
+data_source:
+  - Zeek dns.log, qtype_name=AXFR
+search: |-
+  index=zeek sourcetype=zeek:dns qtype_name=AXFR
+  | rename id_resp_h as host
+  | table id_orig_h host
+how_to_implement: >-
+  Requires defense-tooling's Zeek sensor forwarding dns.log (already
+  forwarded, already used by the Zone transfer / name-resolution-poisoning
+  rows in this backlog). No infra fix needed.
+known_false_positives: >-
+  None found -- zero AXFR queries in 24h of range background traffic
+  before this session's live test. dc2's zone still has
+  SecureSecondaries=NoTransfer (per cyber-range's own build notes), so a
+  real AXFR against dc2 would fail at the DNS-server level before Zeek
+  even sees a completed transfer, but the query itself still lands in
+  dns.log with qtype_name=AXFR either way -- this detection fires on the
+  attempt, not just a successful transfer.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: 'dig axfr cyberhawks.lab @10.0.2.2'
+  result: >-
+    Full unauthenticated zone dump retrieved (every A/SRV/NS record,
+    46 answer records). Fired exactly once.
+embed:
+  title: Zone Transfer
+  additional_fields:
+    - host
+references:
+  - 'detections/backlog.md, "Weak / missing authentication" (backlog row: "Zone transfer (AXFR)")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false
