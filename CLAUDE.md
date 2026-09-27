@@ -118,12 +118,26 @@ scoped to source IP + the planner's fields) came out of this same pass.
   event happens to carry. Keep the search's field list and the planner's
   field list in sync, the same way `defense-tooling`'s
   `splunk_uf_monitor_files` and this file's Zeek-logs table stay in sync.
+- **Zeek fields in SPL use underscores, not the dotted Zeek/CIM
+  convention.** `id.orig_h`, `id.resp_h`, `id.resp_p`, etc. as written in
+  this file's prose (and in Zeek's own docs) are `id_orig_h`, `id_resp_h`,
+  `id_resp_p` in actual search syntax — Splunk silently normalizes dots to
+  underscores for the search-time delimiter extraction this project's Zeek
+  fields use (not `Splunk_TA_zeek`'s own `INDEXED_EXTRACTIONS`, which
+  doesn't work against this range's real data — see `defense-tooling`
+  CLAUDE.md's "Zeek sourcetype/field-extraction incident" for why). Verify
+  a field's real extracted name with `| fieldsummary` before assuming the
+  dotted form works.
 
 ## Status
 
-Design/backlog phase only — see `detections/backlog.md`. No real
-implementation (SPL, saved searches, a deployable app) exists yet. See that
-repo's README for the planned structure once implementation starts.
+Implementation phase started 2026-09-27 (step 5 of the monitoring rollout
+plan — see below). `detections/backlog.md` entries move here as their SPL is
+written and verified against the live range, per the README's "Contributing
+a detection" process. See `defense-tooling` CLAUDE.md's "Zeek sourcetype/
+field-extraction incident" for a real infrastructure bug found and fixed
+while starting this phase (every Zeek log was landing with no field
+extraction at all) before any detection SPL could be tested.
 
 ## Monitoring rollout plan (2026-09-27)
 
