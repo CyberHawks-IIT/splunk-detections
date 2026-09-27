@@ -8,14 +8,35 @@ verified SPL yet.
 Log sources assume the add-ons documented in `defense-tooling`'s
 `docs/add-ons.md`.
 
+## Zeek logs actually needed
+
+`defense-tooling`'s Zeek sensor forwards logs to Splunk on an **explicit
+allowlist**, not everything Zeek produces — see that repo's
+`splunk_uf_log_names` variable. This is the canonical list of which Zeek
+logs the detections below actually depend on; keep it in sync here whenever
+a detection's log source changes.
+
+| Log | Used by |
+|---|---|
+| `conn.log` | Network scanning, DCSync (IP), ADCS RPC/ICPR (IP), pass-the-ticket correlation |
+| `dns.log` | Zone transfer, name resolution poisoning (LLMNR/mDNS portion) |
+| `dce_rpc.log` | SAM/LSA remote enumeration |
+| `kerberos.log` | Pass-the-ticket / ticket reuse |
+| `ldap.log` | LDAP enumeration alerting (source-IP flagging, correlated back to Windows 1644) |
+
+If you add a detection here that needs a Zeek log not in this table, add it
+to the table **and** update `splunk_uf_log_names` in `defense-tooling` (both
+the role default and `group_vars/all.yml.example`) — otherwise the data
+simply won't arrive in Splunk.
+
 ---
 
 ## Reconnaissance & discovery
 
 | Detection | Log source | Status |
 |---|---|---|
-| Network port/host scanning (ICMP, TCP, UDP sweeps) | Zeek `icmp.log`: one source pinging 5+ distinct hosts within ~10s (host discovery sweep); `conn.log`: analogous heuristic for TCP/UDP port scans (many distinct ports or hosts touched by one source in a short window) | ready |
-| Name resolution poisoning (LLMNR / NBT-NS / mDNS) | Zeek — dedicated LLMNR/NBT-NS/mDNS response monitoring; nothing on this network legitimately answers these broadcast queries, so any response at all is suspicious | ready |
+| Network port/host scanning (ICMP, TCP, UDP sweeps) | Zeek `conn.log` — Zeek has no dedicated `icmp.log` (an earlier draft of this entry wrongly assumed one; ICMP shows up in `conn.log` with `proto=icmp`, same as everything else). One source pinging 5+ distinct hosts within ~10s (host discovery sweep); same file, analogous heuristic for TCP/UDP port scans (many distinct ports or hosts touched by one source in a short window) | ready |
+| Name resolution poisoning (LLMNR / NBT-NS / mDNS) | Zeek `dns.log` — LLMNR (5355) and mDNS (5353) are DNS-formatted on the wire, so Zeek's DNS analyzer picks them up there via protocol detection regardless of port; nothing on this network legitimately answers these broadcast queries, so any response at all is suspicious. **NBT-NS (137) is a different, non-DNS protocol and Zeek's base distribution has no analyzer for it** — that part of this detection is unconfirmed and may need a community Zeek package or a different data source entirely | ready — NBT-NS coverage flagged as unconfirmed |
 
 ## Credential exposure
 
