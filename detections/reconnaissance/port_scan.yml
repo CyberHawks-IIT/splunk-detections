@@ -12,9 +12,9 @@ data_source:
 search: |-
   index=zeek sourcetype=zeek:conn (proto=tcp OR proto=udp) id_resp_h=10.0.2.* NOT id_resp_p=123
   | bucket _time span=30s
-  | stats dc(id_resp_p) as distinct_ports dc(id_resp_h) as distinct_hosts values(id_resp_h) as hosts values(id_resp_p) as ports by _time id_orig_h
+  | stats dc(id_resp_p) as distinct_ports dc(id_resp_h) as distinct_hosts values(id_resp_h) as hosts values(id_resp_p) as ports values(proto) as protocol by _time id_orig_h
   | where distinct_ports>=15 OR distinct_hosts>=6
-  | table id_orig_h distinct_ports distinct_hosts hosts ports
+  | table id_orig_h hosts protocol ports
 how_to_implement: >-
   Requires defense-tooling's Zeek sensor forwarding conn.log, plus this
   repo's search-time field extraction fix (see CLAUDE.md's "Zeek
@@ -44,14 +44,14 @@ verification:
     back-to-back land in the same 30s bucket and correctly merge into one
     alert covering the whole burst, rather than duplicating.
 embed:
-  title: TBD -- pending the Alert Embed Planner
+  title: Port Scan
   additional_fields:
-    - distinct_ports
-    - distinct_hosts
     - hosts
+    - protocol
     - ports
 references:
   - detections/backlog.md, "Reconnaissance & discovery"
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
 schedule:
   cron: '*/1 * * * *'
   earliest: '-1m'

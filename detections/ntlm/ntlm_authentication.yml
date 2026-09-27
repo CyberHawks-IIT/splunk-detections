@@ -1,0 +1,84 @@
+name: NTLM Authentication
+id: ntlm-authentication
+version: 2
+date: '2026-09-27'
+status: production
+category: ntlm
+description: >-
+  Any NTLM authentication (user or computer principal) whose source IP is
+  neither a known cyberhawks.lab host nor this range's own control-host
+  administrative path. The focus is NTLM authentication happening at all,
+  not specifically relay -- Kerberos is this domain's default/preferred
+  protocol when both sides support it, so any NTLM logon from an
+  unexpected source is itself the signal, whether it came from a
+  poisoning-based relay, RPC coercion, or a direct NTLM auth attempt.
+data_source:
+  - 'Windows Events -- 4624, Authentication Package Name = NTLM'
+search: |-
+  index=windows EventCode=4624 Authentication_Package=NTLM NOT Source_Network_Address IN ("-","10.0.2.1")
+  | lookup known_range_hosts ip AS Source_Network_Address OUTPUT hostname
+  | where isnull(hostname)
+  | rename ComputerName as host, Account_Name as user
+  | table _time Source_Network_Address host user Package_Name__NTLM_only_ LogonType
+how_to_implement: >-
+  Requires defense-tooling's Windows forwarder shipping Security log 4624,
+  and the known_range_hosts lookup (dt_detection_content, defense-tooling's
+  splunk_indexer role) covering the 7 real range hosts + computer2-5's
+  static IPs. NOT Source_Network_Address IN ("-", "10.0.2.1") is a required
+  exclusion -- see known_false_positives.
+known_false_positives: >-
+  Investigated baseline NTLM frequency before finalizing this (asked
+  explicitly, 2026-09-27): zero NTLM logons of any kind occurred over 3+
+  hours of normal idle range operation -- everything between domain-joined
+  hosts is Kerberos/Negotiate, so this detection has an unusually clean
+  baseline. The one real source of legitimate NTLM found: this control
+  host itself is not domain-joined (see cyber-range CLAUDE.md's WinRM
+  double-hop note), so its own administrative WinRM access to range hosts
+  is NTLM by necessity -- and appears in Source_Network_Address as 10.0.2.1
+  (the gateway), not this host's own address, because of how this
+  particular NetBird VPN route NATs into the ad vnet. "-" covers local/
+  non-network logons (no real source to evaluate). Confirmed this exclusion
+  doesn't blind the detection to real attacks: traffic from john-kali
+  (192.168.1.11, a different subnet reached via plain pfSense routing, not
+  VPN NAT) and from the dedicated relay box "test" (10.0.2.10, on the range
+  subnet directly) both retain their real source IPs -- neither gets
+  NAT-masked the way this control host's traffic does.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source:
+    - test (VMID 350, the dedicated relay/poisoning box, 10.0.2.10)
+    - john-kali (VM 611, 192.168.1.11)
+  technique:
+    - >-
+      Responder (LLMNR/NBT-NS/mDNS poisoning) + impacket ntlmrelayx.py from
+      the test box, relaying to ldap://10.0.2.2 (dc1). Triggered the
+      range's own built-in poolUser_ntlm_relay_http scheduled task on web
+      (manually invoked via Start-ScheduledTask rather than waiting up to 5
+      minutes for its normal interval) rather than fabricating a trigger --
+      see cyber-range CLAUDE.md's vulnerable-range design for why this
+      scheduled task exists.
+    - >-
+      Direct netexec SMB auth from john-kali to workstation using valid
+      Administrator credentials over NTLM (not a relay -- a plain direct
+      NTLM logon from an unexpected source).
+  result: >-
+    Both fired exactly once each, confirming this catches NTLM authentication
+    generally and not only completed relays: the LDAP relay produced a
+    4624 for bsmith, ComputerName=DC1, Source_Network_Address=10.0.2.10;
+    the direct netexec auth produced a 4624 for Administrator,
+    ComputerName=workstation, Source_Network_Address=192.168.1.11.
+embed:
+  title: NTLM Authentication
+  additional_fields:
+    - host
+    - user
+references:
+  - >-
+    detections/backlog.md, "NTLM relay & coercion" (backlog row: "Relayed
+    SMB or LDAP connection")
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

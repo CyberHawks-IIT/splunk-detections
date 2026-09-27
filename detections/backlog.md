@@ -20,7 +20,7 @@ category table below.
 |---|---|---|---|
 | Ping Sweep | 2026-09-27 | [reconnaissance/ping_sweep.yml](reconnaissance/ping_sweep.yml) | Live `nmap -sn` sweep from john-kali against all 7 range hosts, fired exactly once, no false positives over 1h |
 | Port Scan | 2026-09-27 | [reconnaissance/port_scan.yml](reconnaissance/port_scan.yml) | Live `nmap -p 445` sweep + `nmap -p 1-1000` single-host scan from john-kali, each fired exactly once; needed scoping to the range subnet + an NTP exclusion to kill false positives |
-| Relayed SMB or LDAP connection | 2026-09-27 | [ntlm-relay-coercion/relayed_smb_or_ldap.yml](ntlm-relay-coercion/relayed_smb_or_ldap.yml) | Live Responder+ntlmrelayx relay (HTTP trigger -> LDAP on dc1) from the `test` box; baseline NTLM frequency investigated first (zero in 3h+ of idle range operation) — needed an exclusion for this control host's own admin traffic (NAT'd to the gateway IP, 10.0.2.1) |
+| Relayed SMB or LDAP connection | 2026-09-27 | [ntlm/ntlm_authentication.yml](ntlm/ntlm_authentication.yml) | Named "NTLM Authentication" per the Alert Embed Planner — detects any anomalous-source NTLM auth, not just completed relays. Live Responder+ntlmrelayx relay (HTTP trigger -> LDAP on dc1) from the `test` box, plus a direct netexec SMB auth from john-kali; baseline NTLM frequency investigated first (zero in 3h+ of idle range operation) — needed an exclusion for this control host's own admin traffic (NAT'd to the gateway IP, 10.0.2.1) |
 
 ## Zeek logs actually needed
 
