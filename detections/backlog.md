@@ -2,11 +2,22 @@
 
 Every planned detection for the `cyberhawks.lab` range, by category. See
 the [README](../README.md) for what "status" means here — `ready` is a
-design status, not an implementation status. None of these have real,
-verified SPL yet.
+design status, not an implementation status.
 
 Log sources assume the add-ons documented in `defense-tooling`'s
 `docs/add-ons.md`.
+
+## Implemented
+
+Detections that have graduated out of this backlog — real SPL, run and
+verified against the live range, per the README's "Contributing a
+detection" process. Live in `app/default/savedsearches.conf`; removed from
+their category table below.
+
+| Detection | Verified | Notes |
+|---|---|---|
+| Ping Sweep | 2026-09-27 | Live `nmap -sn` sweep from john-kali against all 7 range hosts, fired exactly once, no false positives over 1h |
+| Port Scan | 2026-09-27 | Live `nmap -p 445` sweep + `nmap -p 1-1000` single-host scan from john-kali, each fired exactly once; needed scoping to the range subnet + an NTP exclusion to kill false positives (see savedsearches.conf's description for both) |
 
 ## Zeek logs actually needed
 
@@ -35,8 +46,6 @@ simply won't arrive in Splunk.
 
 | Detection | Log source | Status |
 |---|---|---|
-| Ping Sweep | Zeek `conn.log`, `proto=icmp` — Zeek has no dedicated `icmp.log` (an earlier draft of this entry wrongly assumed one; ICMP shows up in `conn.log`, same as everything else). One source pinging 5+ distinct hosts within ~10s | ready |
-| Port Scan | Zeek `conn.log`, `proto` in (tcp, udp) — one source touching many distinct ports or hosts in a short window | ready |
 | Name resolution poisoning (LLMNR / NBT-NS / mDNS) | Zeek `dns.log` — LLMNR (5355) and mDNS (5353) are DNS-formatted on the wire, so Zeek's DNS analyzer picks them up there via protocol detection regardless of port; nothing on this network legitimately answers these broadcast queries, so any response at all is suspicious. **NBT-NS (137) is a different, non-DNS protocol and Zeek's base distribution has no analyzer for it** — that part of this detection is unconfirmed and may need a community Zeek package or a different data source entirely | ready — NBT-NS coverage flagged as unconfirmed |
 
 ## Credential exposure

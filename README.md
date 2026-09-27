@@ -4,13 +4,15 @@ Detection content — planned and (eventually) implemented — for the
 [CyberHawks-IIT/cyber-range](https://github.com/CyberHawks-IIT/cyber-range)
 Splunk instance.
 
-## Status: design backlog, not implementation
+## Status: implementation in progress
 
 [detections/backlog.md](detections/backlog.md) lists every planned
 detection: the attacker behavior it targets, the log source/event ID(s) it
-needs, and any open questions from design. **None of these are real, tested
-Splunk searches yet.** A `ready` status means *the design is settled* —
-not that working SPL exists. See [CLAUDE.md](CLAUDE.md) before adding any.
+needs, and any open questions from design. A `ready` status means *the
+design is settled* — not that working SPL exists yet for that entry. Entries
+that do have real, verified SPL move to backlog.md's "Implemented" section
+and live in [app/default/savedsearches.conf](app/default/savedsearches.conf).
+See [CLAUDE.md](CLAUDE.md) before adding any.
 
 ## How the pieces fit together
 
@@ -33,13 +35,17 @@ not that working SPL exists. See [CLAUDE.md](CLAUDE.md) before adding any.
 splunk-detections/
   README.md
   CLAUDE.md
-  detections/backlog.md   # every planned detection, by category
+  detections/backlog.md      # every planned detection, by category
+  app/default/app.conf           # deployable Splunk app
+  app/default/savedsearches.conf # verified SPL, one stanza per implemented detection
 ```
 
-Once SPL is written and verified, the plan is a deployable Splunk app
-(`app/default/savedsearches.conf`, macros, lookups) that `defense-tooling`'s
-`splunk_indexer` role can drop straight into `$SPLUNK_HOME/etc/apps/` — same
-pattern it already uses for the Zeek sourcetype mapping.
+`app/` is a deployable Splunk app that `defense-tooling`'s `splunk_indexer`
+role can drop straight into `$SPLUNK_HOME/etc/apps/` — same pattern it
+already uses for its own `dt_detection_content` app. Every stanza in
+`savedsearches.conf` ships `disabled = 1`: Discord webhook alerting isn't
+wired up yet (see CLAUDE.md), so nothing here should fire real alerts until
+that's built.
 
 ## Contributing a detection
 
