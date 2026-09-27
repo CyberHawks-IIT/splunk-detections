@@ -1,0 +1,81 @@
+name: Kerberoast
+id: weak-auth-kerberoast
+version: 1
+date: '2026-09-27'
+status: production
+category: weak-auth
+description: >-
+  Kerberoasting -- requesting a service ticket (4769) for a user-account
+  SPN (not a computer/machine account's own service tickets, which are
+  normal background Kerberos traffic) in order to crack the account's
+  password offline from the ticket. Catches both the classic weak-crypto
+  variant (RC4-HMAC ticket encryption, which every legitimate service
+  ticket in this range's baseline gets AES for instead) and the
+  mass-request variant (one source requesting tickets for 2+ distinct
+  user-account SPNs in a 5-minute window -- this range only has 2 real
+  user-account SPNs total, so touching more than 1 already stands out from
+  the zero-distinct-SPN-request baseline of normal traffic).
+data_source:
+  - >-
+    Windows Events -- 4769, Ticket Encryption Type = 0x17 (RC4-HMAC), or 2+
+    distinct non-machine-account Service Names requested by one source
+    within 5 minutes
+search: |-
+  index=windows EventCode=4769 NOT Service_Name=krbtgt NOT Service_Name="*$"
+  | eval Client_Address=replace(Client_Address, "^::ffff:", "")
+  | eval encryption=case(Ticket_Encryption_Type="0x17","rc4-hmac", Ticket_Encryption_Type="0x12","aes256", Ticket_Encryption_Type="0x11","aes128", Ticket_Encryption_Type="0x3","des-cbc-md5", 1=1, Ticket_Encryption_Type)
+  | bucket _time span=5m
+  | stats values(Service_Name) as users dc(Service_Name) as distinct_services values(encryption) as encryption values(Ticket_Encryption_Type) as raw_enc by _time Client_Address
+  | where distinct_services>=2 OR like(raw_enc,"%0x17%")
+  | table Client_Address users encryption
+how_to_implement: >-
+  Requires defense-tooling's Windows forwarder shipping Security log 4769
+  from the DCs (already forwarded). No infra fix needed. The
+  `NOT Service_Name="*$"` exclusion is required -- see
+  known_false_positives -- since Service_Name is the *target* of the
+  ticket request, and machine accounts (DC1$, WEB$, etc.) requesting
+  service tickets to each other/themselves is routine Kerberos
+  authentication traffic, not Kerberoasting.
+known_false_positives: >-
+  Investigated 24h of baseline 4769 traffic before finalizing this. Every
+  domain-joined host's machine account requests service tickets to DC1$/
+  DC2$/itself every few minutes (routine Kerberos auth) -- these are
+  always AES256 and always target other machine accounts, so they're
+  excluded by `NOT Service_Name="*$"` (an earlier draft that only excluded
+  by *requesting* account, `NOT Account_Name="*$@*"`, still false-positived
+  on admin@CYBERHAWKS.LAB triggering 2-3 distinct machine-account service
+  tickets during a normal interactive logon on web -- the fix was excluding
+  by the *target* Service_Name instead). A recurring scripted health-check
+  (rsmith/bsmith authenticating to WEB$ every 5 minutes) also only ever
+  touches 1 distinct service and is always AES256, so it never crosses
+  either leg's threshold. Zero RC4-HMAC 4769 events and a max of 3 distinct
+  Service_Names in any 5-minute window (always all machine accounts) found
+  in 24h of background traffic before this session's live test.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    impacket-GetUserSPNs cyberhawks.lab/asmith:princess -dc-ip 10.0.2.2
+    -request (using asmith's password, cracked from the AS-REP Roast
+    detection's own live test earlier this session)
+  result: >-
+    Retrieved real crackable TGS hashes (etype 23/RC4-HMAC) for both
+    user-account SPNs in the domain, crackme and svc-mssql, in one run.
+    Fired exactly once, correctly merged into a single alert by the
+    5-minute bucket, both the RC4-HMAC leg and the 2-distinct-SPNs leg
+    independently confirmed true (tested together as the OR the search
+    actually uses).
+embed:
+  title: Kerberoast
+  additional_fields:
+    - users
+    - encryption
+references:
+  - 'detections/backlog.md, "Weak / missing authentication" (backlog row: "Kerberoast")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '*/5 * * * *'
+  earliest: '-5m'
+  latest: now
+disabled: false

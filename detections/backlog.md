@@ -25,6 +25,7 @@ category table below.
 | LSA hive dumping (incl. LSA secrets) | 2026-09-27 | See SAM hive dumping row above — same split applies (Registry Export merged with SAM; [credential-dumping/lsa_dump_registry_query.yml](credential-dumping/lsa_dump_registry_query.yml) as "LSA Dump: Registry Query" for the distinguishable technique) | — |
 | DPAPI masterkey / credential file theft | 2026-09-27 | [credential-dumping/dpapi_dump.yml](credential-dumping/dpapi_dump.yml) | Live masterkey + credential-blob file reads on workstation, fired exactly once, no false positives over 4h — worked as originally designed |
 | ASREPRoast | 2026-09-27 | [weak-auth/asreproast.yml](weak-auth/asreproast.yml) | Named "AS-REP Roast" per the Alert Embed Planner. Live `impacket-GetNPUsers` against asmith (the range's dedicated no-preauth account) from john-kali, fired exactly once (2 4768s 11ms apart merged by a 1m bucket); worked as originally designed, no infra fix needed — confirmed zero Pre-Authentication-Type=0 events in 24h of background traffic beforehand |
+| Kerberoast | 2026-09-27 | [weak-auth/kerberoast.yml](weak-auth/kerberoast.yml) | Live `impacket-GetUserSPNs` against both real user-SPN accounts (crackme, svc-mssql) using asmith's cracked password, fired exactly once. Needed a real fix mid-design: filtering by the *requesting* account (`NOT Account_Name="*$@*"`) still false-positived on a human admin's normal logon triggering machine-account service tickets — switched to filtering by the *target* Service_Name (`NOT Service_Name="*$"`) instead, since machine accounts requesting tickets to each other is the actual baseline noise pattern, not who's asking |
 
 ## Zeek logs actually needed
 
@@ -69,7 +70,6 @@ simply won't arrive in Splunk.
 
 | Detection | Log source | Status |
 |---|---|---|
-| Kerberoast | Windows Events — 4769, alerting on RC4-HMAC (`0x17`) ticket-encryption requests, or on one account requesting service tickets for an unusually large number of distinct SPNs within the search window (the weak-crypto and mass-request Kerberoasting variants) | ready |
 | Password spray / guessable password | Windows Events — 4771 + 4625 | ready |
 | Pre-2000 / blank password | Windows Events — 4624 | ready |
 | Anonymous logon / null session | Zeek `dce_rpc.log` — the specific enumeration calls an anonymous/null session actually enables: MS-LSAT `LsarLookupSids` and MS-SAMR `SamrEnumerateUsersInDomain` (mirroring what NetExec's `--users`/`--groups`/trust-enumeration switches call), plus their group and trust equivalents; correlate to the target's 4624 anonymous logon for session context | ready |
