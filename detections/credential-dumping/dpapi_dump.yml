@@ -1,0 +1,51 @@
+name: DPAPI Dump
+id: dpapi-dump
+version: 1
+date: '2026-09-27'
+status: production
+category: credential-dumping
+description: >-
+  A process other than lsass.exe reading a user's DPAPI masterkey or
+  credential-blob store (%APPDATA%\Microsoft\Protect\<SID>\ or
+  %LOCALAPPDATA%\Microsoft\Credentials\) -- the file-theft half of a DPAPI
+  credential decryption attack (mimikatz dpapi::masterkey/cred, or manual
+  file copy for offline decryption elsewhere).
+data_source:
+  - 'Windows Events -- 4663, Object Name under a Protect or Credentials folder'
+search: |-
+  index=windows EventCode=4663 (Object_Name="*\Protect\*" OR Object_Name="*\Protect" OR Object_Name="*\Credentials\*" OR Object_Name="*\Credentials") NOT Process_Name="*lsass.exe"
+  | bucket _time span=10s
+  | stats count values(Object_Name) as files by _time ComputerName Account_Name
+  | rename ComputerName as host, Account_Name as user
+  | table host user files
+how_to_implement: >-
+  Requires the file-system SACL on the Protect and Credentials folders
+  (cyber-range's detection_logging role) and the "File System" audit
+  subcategory (also already set). Worked as originally designed -- no
+  additional fix needed, unlike the SAM/SECURITY export technique.
+known_false_positives: >-
+  None found over 4h of normal range background traffic.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: this control host, Administrator over WinRM (Defender real-time monitoring disabled first)
+  technique: >-
+    Get-Content against the discovered masterkey file under
+    C:\Users\Administrator\AppData\Roaming\Microsoft\Protect\<SID>\ and the
+    credential blob under C:\Users\Administrator\AppData\Local\Microsoft\
+    Credentials\, on workstation.
+  result: Fired exactly once (both file reads landed in the same 10s bucket).
+embed:
+  title: DPAPI Dump
+  additional_fields:
+    - host
+    - user
+    - files
+references:
+  - 'detections/backlog.md, "Credential & ticket dumping" (backlog row: "DPAPI masterkey / credential file theft")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

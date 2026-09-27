@@ -143,6 +143,62 @@ scoped to source IP + the planner's fields) came out of this same pass.
   verification evidence together in one reviewable place instead of
   scattered across a shared file's stanzas.
 
+## SAM/LSA dump detection: two techniques, only one splits by hive (2026-09-27)
+
+While live-testing the SAM/LSA hive-dumping detections on `workstation`
+(Defender real-time monitoring disabled first, per the user's ask), found
+that the classic `reg save HKLM\SAM ...` technique produces **no usable
+telemetry at all** under this project's original design (4656/4663 SACLs on
+the registry key + file), and required real infrastructure fixes before it
+produced anything:
+
+1. `RegSaveKeyEx`'s backup-privilege codepath never trips the ordinary
+   Registry/File System SACLs — confirmed zero 4656/4663 for `reg.exe`
+   even with correct SACLs and audit subcategories. Windows' real signal
+   for this is Privilege Use (4673/4674), not Object Access.
+2. Enabling "Sensitive Privilege Use" auditing alone wasn't enough either —
+   Windows separately gates *all* backup/restore-privilege auditing behind
+   an LSA registry value, `FullPrivilegeAuditing`
+   (`HKLM\SYSTEM\CurrentControlSet\Control\Lsa`), which needs a **reboot**
+   to take effect (LSA reads it once at startup). cyber-range's
+   `detection_logging` role now sets this value for future provisioning
+   (`configure_audit_policy.ps1`); this session applied it live via a
+   reboot on every reachable range host except ca/sql2 (LAPS-managed local
+   admin, not directly accessible this session).
+3. Even with both of those, `defense-tooling`'s Windows forwarder ships an
+   explicit per-channel Event ID whitelist for the Security log that
+   simply didn't include 4673/4674 — added them
+   (`group_vars/splunk_forwarders_windows/monitor.yml`).
+4. Once all three were fixed, 4674 turned out extremely noisy from a
+   *different* direction: ordinary software (Splunk's own forwarder
+   binaries, Edge WebView, Teams, the Widgets dashboard app) routinely
+   exercises backup/restore privilege — 17,000+ events from `splunkd.exe`
+   alone in one hour. Scoped to `Process_Name=reg.exe` to cut through it.
+5. **Real, durable limitation, not a config gap:** the 4674 event this
+   produces never names the *source* registry key (only an object-less
+   privilege check, or the destination file `reg.exe` is writing to, which
+   is attacker-controlled). So this technique cannot be split into
+   separate SAM/LSA detections without command-line matching — which the
+   user explicitly ruled out ("never make command line based detections -
+   all detections should be action based"). It ships as one merged
+   detection, **SAM/LSA Dump: Registry Export**.
+6. The *other* local dumping technique — direct `RegQueryValueEx`/
+   `RegEnumKeyEx` enumeration (what SYSTEM-context tooling and remote
+   SAMR/LSARPC-style access actually do under the hood) — does **not**
+   use backup privilege at all, goes through the ordinary Registry SACL
+   path, and correctly names the real key
+   (`\REGISTRY\MACHINE\SAM\...` vs `\REGISTRY\MACHINE\SECURITY\...`). This
+   one splits cleanly: **SAM Dump: Registry Query** and
+   **LSA Dump: Registry Query**.
+
+Net result: 3 saved searches instead of 2 for this backlog area (plus
+DPAPI Dump, which needed no fix and worked as originally designed), named
+to make the technique split explicit rather than folding it into one
+ambiguous "SAM Dump (Local)"/"LSA Dump (Local)" pair. The NTDS.dit
+extraction row in `backlog.md` is flagged as needing the same verification
+before assuming its SACL-only design actually fires — `ntdsutil`'s IFM path
+plausibly hits the same backup-privilege gap.
+
 ## Status
 
 Implementation phase started 2026-09-27 (step 5 of the monitoring rollout
