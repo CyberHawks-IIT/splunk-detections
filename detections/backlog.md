@@ -24,6 +24,7 @@ category table below.
 | SAM hive dumping | 2026-09-27 | Split into two: [credential-dumping/sam_lsa_dump_registry_export.yml](credential-dumping/sam_lsa_dump_registry_export.yml) (as "SAM/LSA Dump: Registry Export") and [credential-dumping/sam_dump_registry_query.yml](credential-dumping/sam_dump_registry_query.yml) (as "SAM Dump: Registry Query") | Two independent local dumping techniques, each with different telemetry. `reg save` (export) needed a 3-part infra fix (Sensitive Privilege Use auditing + FullPrivilegeAuditing LSA value + a forwarder whitelist gap for 4673/4674) and still can't name which hive was read — merged with LSA into one alert. Direct registry query (as SYSTEM) worked as originally designed and correctly names the hive, so it stays a separate alert per hive. Live-tested both ways on workstation with Defender real-time monitoring disabled. |
 | LSA hive dumping (incl. LSA secrets) | 2026-09-27 | See SAM hive dumping row above — same split applies (Registry Export merged with SAM; [credential-dumping/lsa_dump_registry_query.yml](credential-dumping/lsa_dump_registry_query.yml) as "LSA Dump: Registry Query" for the distinguishable technique) | — |
 | DPAPI masterkey / credential file theft | 2026-09-27 | [credential-dumping/dpapi_dump.yml](credential-dumping/dpapi_dump.yml) | Live masterkey + credential-blob file reads on workstation, fired exactly once, no false positives over 4h — worked as originally designed |
+| ASREPRoast | 2026-09-27 | [weak-auth/asreproast.yml](weak-auth/asreproast.yml) | Named "AS-REP Roast" per the Alert Embed Planner. Live `impacket-GetNPUsers` against asmith (the range's dedicated no-preauth account) from john-kali, fired exactly once (2 4768s 11ms apart merged by a 1m bucket); worked as originally designed, no infra fix needed — confirmed zero Pre-Authentication-Type=0 events in 24h of background traffic beforehand |
 
 ## Zeek logs actually needed
 
@@ -68,7 +69,6 @@ simply won't arrive in Splunk.
 
 | Detection | Log source | Status |
 |---|---|---|
-| ASREPRoast | Windows Events — 4768 | ready |
 | Kerberoast | Windows Events — 4769, alerting on RC4-HMAC (`0x17`) ticket-encryption requests, or on one account requesting service tickets for an unusually large number of distinct SPNs within the search window (the weak-crypto and mass-request Kerberoasting variants) | ready |
 | Password spray / guessable password | Windows Events — 4771 + 4625 | ready |
 | Pre-2000 / blank password | Windows Events — 4624 | ready |

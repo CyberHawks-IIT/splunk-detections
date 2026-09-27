@@ -1,0 +1,61 @@
+name: AS-REP Roast
+id: weak-auth-asreproast
+version: 1
+date: '2026-09-27'
+status: production
+category: weak-auth
+description: >-
+  A Kerberos TGT request (4768) for an account that has "Do not require
+  Kerberos preauthentication" set -- Pre-Authentication Type 0, as opposed
+  to the normal encrypted-timestamp pre-auth (type 2) every other account
+  in this domain uses. This is what ASREPRoast (impacket's GetNPUsers.py,
+  Rubeus asreproast) actually abuses: no proof of knowledge of the
+  password is required to get an AS-REP back, so the account's TGT is
+  handed out to anyone who asks, encrypted with a key derived from the
+  account's password and crackable offline.
+data_source:
+  - 'Windows Events -- 4768, Pre-Authentication Type = 0'
+search: |-
+  index=windows EventCode=4768 Pre_Authentication_Type=0
+  | eval Client_Address=replace(Client_Address, "^::ffff:", "")
+  | bucket _time span=1m
+  | stats values(Account_Name) as users by _time Client_Address
+  | table Client_Address users
+how_to_implement: >-
+  Requires defense-tooling's Windows forwarder shipping Security log 4768
+  from the DCs (already forwarded per the monitoring rollout plan). No
+  infra fix needed -- worked as originally designed.
+known_false_positives: >-
+  None -- Pre-Authentication Type 0 on 4768 is a static, deliberate account
+  property in this range (only asmith has "Do not require Kerberos
+  preauthentication" set, per cyber-range's VULNERABLE_RANGE_PLAN.md), not
+  something that happens as a side effect of normal Kerberos traffic.
+  Checked 24h of range background traffic: zero Pre-Authentication Type=0
+  events before this session's live test. Note this means ANY TGT request
+  for asmith trips this alert, legitimate or not -- that's inherent to the
+  vulnerability being detected (the account itself is the weakness, not a
+  particular request), matching how the backlog/planner scoped this
+  detection (no additional filtering called for).
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: 'impacket-GetNPUsers cyberhawks.lab/asmith -no-pass -dc-ip 10.0.2.2'
+  result: >-
+    Retrieved a real crackable AS-REP hash for asmith. Produced 2 4768
+    events (asmith requests a TGT twice per attempt) 11ms apart, correctly
+    merged into a single alert by the 1m bucket; Client_Address correctly
+    showed the real attacker IP (192.168.1.11, not NAT-masked) with the
+    ::ffff: IPv4-mapped prefix stripped.
+embed:
+  title: AS-REP Roast
+  additional_fields:
+    - users
+references:
+  - 'detections/backlog.md, "Weak / missing authentication" (backlog row: "ASREPRoast")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false
