@@ -24,6 +24,62 @@ back-and-forth, not a first guess — the notes on tricky ones (LDAP query
 volume, NTLM relay detection specificity, SAM/LSA remote-dump coverage)
 capture real reasoning that would otherwise be lost.
 
+## Detection design pass — alert embeds (2026-09-27)
+
+Once these detections go live, alerts push to Discord via a webhook (each
+embed: title, an Attacker field resolved from source IP, plus whatever
+extra fields that detection needs). In preparation, every backlog.md
+detection was run through a dedicated planning tool — the **Alert Embed
+Planner**, a standalone Claude Artifact, not tracked in this repo — to
+decide each one's embed title and fields. That pass surfaced real design
+gaps and questions, not just naming, so `backlog.md` changed too:
+
+- **Split, because they were really separate techniques:** Ping Sweep vs.
+  Port Scan (ICMP vs. TCP/UDP); the old single SQL Server row into four
+  (`xp_cmdshell`, `xp_dirtree`, `EXECUTE AS`, linked server); Logon script
+  tampering vs. ScriptPath attribute tampering; and "Portal DB readable /
+  weak admin password" into Web.config.bak credential leak vs. Portal
+  database read (see below — these turned out to be two independent bugs).
+- **Merged, because they're really one alert:** LDAP/LDAPS/ADWS query
+  content collapsed into a single LDAP Query detection with a `protocol`
+  field, since all three ultimately land in the same DC-side 1644 log.
+- **Logic tweaks from the review:** Kerberoast now keys on RC4-HMAC or a
+  burst of SPN requests; Anonymous logon retargeted to the specific
+  `dce_rpc.log` RPC calls (`LsarLookupSids`, `SamrEnumerateUsersInDomain`)
+  instead of the bare 4624; DCSync and ADCS RPC/ICPR issuance both gained
+  exclusions for legitimate DC-to-DC and machine-self-enrollment traffic;
+  the two remote-vs-local scheduled-task/service pairs gained the
+  correlation (presence of a preceding remote logon) that actually
+  distinguishes them, since neither had one before.
+- **Portal DB readable, root-caused:** dug into `cyber-range`'s actual
+  `web_portal` role rather than guessing. IIS was given a MIME-type mapping
+  for `.bak`, so a stray `Web.config.bak` next to the live config is
+  servable over HTTP and leaks the real `svc-web` SQL connection string —
+  one detection. Independently, `CyberHawksPortal` is *also* readable via
+  Windows Auth by any domain user, misconfig unrelated to the leak —
+  a second detection that fires on either path. "Weak admin password"
+  isn't its own row: the admin's hash (`SHA1('abc123')`, username `admin`)
+  is a static fact you get from either DB-read path, not a separate live
+  event.
+- **Rubeus ticket enumeration, researched and deliberately left
+  undesigned:** confirmed the LSASS memory-access row is mimikatz-only —
+  Rubeus's own-session `triage`/`dump`/`klist` go through the legitimate
+  `LsaCallAuthenticationPackage` LSA API (same as native `klist.exe`), not
+  a memory read on `lsass.exe`, so they were never covered. There's no
+  native Windows telemetry for that LSA API call, and every fallback
+  surface considered (Sysmon Event 1 command-line matching, PowerShell
+  Script Block Logging for a reflectively-loaded copy) is narrow and
+  evadable — so rather than fabricate a `ready` row around a weak signal,
+  this is flagged as an open item in the LSASS row's note and left
+  undesigned on purpose. Revisit if a stronger signal turns up.
+- Confirmed against `defense-tooling`'s actual deployed config (not just
+  assumed) that every log source these tweaks need — `dce_rpc.log`, every
+  Windows event ID touched, `Directory Service`/1644 on the DCs — was
+  already forwarded. No `defense-tooling` changes came out of this pass.
+
+The two new Conventions below (Splunk alert name = embed title; SPL output
+scoped to source IP + the planner's fields) came out of this same pass.
+
 ## Conventions
 
 - **Never write SPL into this repo that hasn't been run and verified.** A
@@ -45,6 +101,23 @@ capture real reasoning that would otherwise be lost.
   detection needs a new add-on that isn't already in
   `defense-tooling/docs/add-ons.md`, flag it there (with a note on why)
   rather than assuming a specific package exists.
+- **A detection's Splunk alert name is its Discord embed title, not this
+  file's `Detection`-column wording.** The Alert Embed Planner (a
+  standalone tool, not tracked in this repo) is the source of truth for
+  each detection's human-facing name — that title is what the saved search
+  should be named and what actually shows up in Discord. This file's
+  `Detection` column stays a technical/descriptive label (matching the
+  attacker-action language from `cyber-range`'s `VULNERABLE_RANGE_PLAN.md`)
+  and is under no obligation to match the embed title word-for-word — they
+  serve different readers.
+- **A detection's SPL output is scoped to what the embed actually needs.**
+  Once real SPL is written (not yet — see Status below), the search's
+  final `table`/`fields` should be exactly: the source IP (for the
+  Attacker lookup) plus whatever "additional fields" are configured for
+  that detection in the Alert Embed Planner — not every field the raw
+  event happens to carry. Keep the search's field list and the planner's
+  field list in sync, the same way `defense-tooling`'s
+  `splunk_uf_monitor_files` and this file's Zeek-logs table stay in sync.
 
 ## Status
 

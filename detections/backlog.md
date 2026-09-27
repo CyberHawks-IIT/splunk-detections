@@ -35,7 +35,8 @@ simply won't arrive in Splunk.
 
 | Detection | Log source | Status |
 |---|---|---|
-| Network port/host scanning (ICMP, TCP, UDP sweeps) | Zeek `conn.log` — Zeek has no dedicated `icmp.log` (an earlier draft of this entry wrongly assumed one; ICMP shows up in `conn.log` with `proto=icmp`, same as everything else). One source pinging 5+ distinct hosts within ~10s (host discovery sweep); same file, analogous heuristic for TCP/UDP port scans (many distinct ports or hosts touched by one source in a short window) | ready |
+| Ping Sweep | Zeek `conn.log`, `proto=icmp` — Zeek has no dedicated `icmp.log` (an earlier draft of this entry wrongly assumed one; ICMP shows up in `conn.log`, same as everything else). One source pinging 5+ distinct hosts within ~10s | ready |
+| Port Scan | Zeek `conn.log`, `proto` in (tcp, udp) — one source touching many distinct ports or hosts in a short window | ready |
 | Name resolution poisoning (LLMNR / NBT-NS / mDNS) | Zeek `dns.log` — LLMNR (5355) and mDNS (5353) are DNS-formatted on the wire, so Zeek's DNS analyzer picks them up there via protocol detection regardless of port; nothing on this network legitimately answers these broadcast queries, so any response at all is suspicious. **NBT-NS (137) is a different, non-DNS protocol and Zeek's base distribution has no analyzer for it** — that part of this detection is unconfirmed and may need a community Zeek package or a different data source entirely | ready — NBT-NS coverage flagged as unconfirmed |
 
 ## Credential exposure
@@ -53,10 +54,10 @@ simply won't arrive in Splunk.
 | Detection | Log source | Status |
 |---|---|---|
 | ASREPRoast | Windows Events — 4768 | ready |
-| Kerberoast | Windows Events — 4769 | ready |
+| Kerberoast | Windows Events — 4769, alerting on RC4-HMAC (`0x17`) ticket-encryption requests, or on one account requesting service tickets for an unusually large number of distinct SPNs within the search window (the weak-crypto and mass-request Kerberoasting variants) | ready |
 | Password spray / guessable password | Windows Events — 4771 + 4625 | ready |
 | Pre-2000 / blank password | Windows Events — 4624 | ready |
-| Anonymous logon / null session | Windows Events — 4624 (anonymous) | ready |
+| Anonymous logon / null session | Zeek `dce_rpc.log` — the specific enumeration calls an anonymous/null session actually enables: MS-LSAT `LsarLookupSids` and MS-SAMR `SamrEnumerateUsersInDomain` (mirroring what NetExec's `--users`/`--groups`/trust-enumeration switches call), plus their group and trust equivalents; correlate to the target's 4624 anonymous logon for session context | ready |
 | NetNTLMv1 permitted | Windows Events — 4624, the `Package Name (NTLM only)` field = `NTLM V1` (corrected from an earlier draft that referenced 8004, which doesn't reliably break out NTLM version) | ready |
 | Zone transfer (AXFR) | Zeek — `dns.log` | ready |
 
@@ -70,21 +71,40 @@ simply won't arrive in Splunk.
 
 ## SQL Server
 
+> All four of these need the SQL Server Audit/Extended Events source, which isn't wired up yet — see `defense-tooling`'s open items (SQL Server Audit/Extended Events aren't plain text, need the Splunkbase SQL Server add-on or custom scripting).
+
 | Detection | Log source | Status |
 |---|---|---|
-| Svc reuse / Windows Auth open / EXECUTE AS / linked server | SQL Server Audit / Extended Events | ready — **note:** this data source isn't wired up yet; see `defense-tooling`'s open items (SQL Server Audit/Extended Events aren't plain text, need the Splunkbase SQL Server add-on or custom scripting) |
+| `xp_cmdshell` execution | SQL Server Audit / Extended Events | ready |
+| `xp_dirtree` execution | SQL Server Audit / Extended Events | ready |
+| `EXECUTE AS` impersonation | SQL Server Audit / Extended Events | ready |
+| Linked server command execution | SQL Server Audit / Extended Events | ready |
 
 ## Web application
 
+> These two used to be one row ("Portal DB readable / weak admin password").
+> Splitting them because they're independently exploitable: a leaked
+> credential in a stray backup file, and a separate DB permission
+> misconfiguration. "Weak admin password" isn't its own row — see the note
+> below the table for why.
+
 | Detection | Log source | Status |
 |---|---|---|
-| Portal DB readable / weak admin password | App / IIS log | ready |
+| `Web.config.bak` credential leak | App / IIS log — `Web.config` is deployed alongside a byte-identical `Web.config.bak` on `web` (left behind from a manual edit, per this range's design), and IIS's static-content handler was given a MIME-type mapping for `.bak` so it actually serves the file instead of 404ing. Alert on any HTTP GET of `Web.config.bak` (or any `.bak`/config-backup-looking path) returning 200 — nothing legitimate ever requests it. The file itself contains the real `svc-web` SQL Server connection string, plaintext password included. | ready |
+| Portal database read via leaked or permissive credentials | SQL Server Audit / Extended Events (not wired up yet — same gap as the SQL Server category below). Two independent paths land here: (1) the leaked `svc-web` SQL login from the row above, used to query `CyberHawksPortal` directly, and (2) `CyberHawksPortal` being readable via Windows Auth by any domain user, independent of the leak. Alert on either principal — anything other than the web app's own expected service context — reading the `Users` table. | ready |
+
+**Why "weak admin password" isn't its own row:** it's a static property (the
+portal admin's password hash, `SHA1('abc123')`, is crackable once read),
+not a live event with its own telemetry — it's the *consequence* of the DB
+read above, not a separate detectable action. If the portal ever gains its
+own authentication logging, "admin login from an unexpected source" would
+be the row to add then; nothing to alert on for it yet.
 
 ## ADCS
 
 | Detection | Log source | Status |
 |---|---|---|
-| RPC/ICPR issuance (ESC1-4, 6, 7, 9, 10, 13, 15-17) | CA operational log (action) + Zeek `conn.log` (IP) | ready |
+| RPC/ICPR issuance (ESC1-4, 6, 7, 9, 10, 13, 15-17) | CA operational log (action) + Zeek `conn.log` (IP), excluding normal auto-enrollment where the requesting principal is the machine account of the host the certificate is issued to | ready |
 | HTTP web enrollment (ESC8) | IIS log on the CA | ready |
 
 ## Credential & ticket dumping
@@ -95,10 +115,10 @@ simply won't arrive in Splunk.
 | LSA hive dumping (incl. LSA secrets) | Windows Events — 4656/4663 SACL on `HKLM\SECURITY` + a File System SACL on `%SystemRoot%\System32\config\SECURITY`, filtered to process ≠ `lsass.exe`, plus the WMI-Activity operational log for VSS creation, same as SAM above | ready |
 | SAM — remote via SAMR | Zeek — `dce_rpc.log`, SAMR interface (account enumeration only — doesn't touch the registry, so this is its only detection surface and can go dark under SMB encryption); a remote SAM *hive* dump (`netexec --sam`, `secretsdump`) goes through Remote Registry/MS-RRP instead, which trips the host-side SAM registry SACL above regardless of encryption | ready |
 | LSA — remote via LSARPC | Zeek — `dce_rpc.log`, LSARPC interface (policy/secrets enumeration — doesn't touch the registry, can go dark under SMB encryption); a remote SECURITY hive dump goes through Remote Registry/MS-RRP instead, which trips the host-side SECURITY registry SACL above regardless of encryption | ready |
-| LSASS memory access (mimikatz `sekurlsa`, Rubeus ticket dumping) | Sysmon Event 10 (ProcessAccess, target = `lsass.exe`), filtered to `GrantedAccess` masks associated with credential reading (`0x1010`, `0x1038`, `0x1400`, `0x1438`, `0x143a`) and an allowlist of legitimate accessors (Defender/`MsMpEng`, WMI provider host) + 4624/4697 for source IP — these access levels aren't part of normal Windows operation outside that allowlist | ready — **caveat:** PsExec running as SYSTEM breaks the account-name join to `SourceUser`; fall back to 4697 (service install) + process lineage in that case |
+| LSASS memory access (mimikatz `sekurlsa`) | Sysmon Event 10 (ProcessAccess, target = `lsass.exe`), filtered to `GrantedAccess` masks associated with credential reading (`0x1010`, `0x1038`, `0x1400`, `0x1438`, `0x143a`) and an allowlist of legitimate accessors (Defender/`MsMpEng`, WMI provider host) + 4624/4697 for source IP — these access levels aren't part of normal Windows operation outside that allowlist | ready — **caveat:** PsExec running as SYSTEM breaks the account-name join to `SourceUser`; fall back to 4697 (service install) + process lineage in that case. **Resolved research question, mimikatz-only confirmed:** Rubeus's own-session ticket ops (`triage`/`dump`/`klist`) go through the legitimate `LsaCallAuthenticationPackage` LSA API against the Kerberos SSP — the same mechanism native `klist.exe` uses — rather than a memory-read handle on `lsass.exe`, so this row never catches them. **Open item, deliberately undocumented as a designed detection:** there's no native Windows telemetry for that LSA API call itself (confirmed via research — see EDR vendors' own writeups on `LsaCallAuthenticationPackage`/the `lsasspirpc` ALPC port), and the realistic fallback surfaces (Sysmon Event 1 command-line matching, PowerShell Script Block Logging for a reflectively-loaded copy) are all narrow and evadable enough that none of them earned a `ready` row yet. Revisit if a stronger signal turns up; extracting *other* users' tickets needs prior SYSTEM-level privilege escalation first, which is already covered under Lateral movement / Host persistence below. |
 | DPAPI masterkey / credential file theft | Windows Events — 4663, SACL on the Protect and Credentials folders | ready |
 | Pass-the-ticket / ticket reuse | Zeek — `kerberos.log`, same ticket from a different source IP | ready |
-| DCSync | Windows Events — 4662 (action) + Zeek `conn.log` (IP) | ready |
+| DCSync | Windows Events — 4662 (action) + Zeek `conn.log` (IP), excluding DS-Replication-Get-Changes* activity performed by the domain controllers' own machine accounts (legitimate inter-DC replication) | ready |
 | WinRM logon | Windows Events — 4624 (Logon Type 3) + `Microsoft-Windows-WinRM/Operational` log for session establishment (PsExec and remote scheduled tasks are covered separately under Lateral movement below — don't conflate this with those) | ready |
 | NTDS.dit extraction (IFM / shadow copy on a DC) | WMI-Activity operational log (`Win32_ShadowCopy` `Create` method invocation — catches `vssadmin`/`wmic`/PowerShell uniformly, no command-line auditing needed) + 4663 SACL on `%SystemRoot%\NTDS\ntds.dit` | ready |
 | Shadow Credentials (KeyCredentialLink abuse) | Windows Events — 5136 (directory service object modified, `msDS-KeyCredentialLink`) | ready |
@@ -107,41 +127,40 @@ simply won't arrive in Splunk.
 
 | Detection | Log source | Status |
 |---|---|---|
-| LDAP query content (users, groups, description, etc.) | Windows Events — 1644 with both Field Engineering thresholds (Search Time Threshold, Expensive Search Results Threshold) set to 0, logging the filter, base DN, attributes, and client IP for **every** LDAP query, not just expensive ones. No alerting on 1644 by itself — it's the log-everything layer. Alerting comes from Zeek `ldap.log` flagging any bind/search from an IP that isn't one of the domain-joined systems; when that fires, correlate its timestamp/source IP back to the matching 1644 event to pull the actual query. **Volume management:** cap the local `Directory Service` log (`wevtutil sl`, fixed max size, overwrite-oldest retention) so it never fills, and forward 1644 off the DC promptly (WEF or a log shipper) — the local copy only needs a short correlation window, not permanent history. Same forwarding/rotation approach applies to LDAPS and ADWS below. | ready |
-| LDAPS query content | Same two-layer design as LDAP above — 1644 logs every query's content (fires server-side after decryption, so wire encryption doesn't blind it); since Zeek can't decrypt LDAPS, the alerting layer is `conn.log` flagging any TCP/636 connection from a non-domain-joined IP, then correlating to 1644 for the content | ready |
-| ADWS query content | Same two-layer design as LDAP — ADWS ultimately hands its translated queries to the same local DS/LDAP engine on the DC, so 1644 should capture the content there too; alerting is Zeek `conn.log` flagging a non-domain-joined IP touching TCP/9389, correlated to 1644 by timestamp | ready — **known gap:** the 1644 event's client IP may show the ADWS service process itself rather than the true remote caller, so correlate by timestamp rather than IP match here; not yet confirmed against a real ADWS query on this build |
+| LDAP query content (users, groups, description, etc.) — one alert, `protocol` field set to `ldap`/`ldaps`/`adws` depending on which one fired | Windows Events — 1644 with both Field Engineering thresholds (Search Time Threshold, Expensive Search Results Threshold) set to 0, logging the filter, base DN, attributes, and client IP for **every** LDAP query, not just expensive ones — all three protocols land here, since LDAPS and ADWS both ultimately hand off to the same local LDAP engine on the DC. No alerting on 1644 by itself — it's the log-everything layer. Alerting: Zeek `ldap.log` for plain LDAP, flagging any bind/search from a non-domain-joined IP; `conn.log` (TCP/636) for LDAPS, since Zeek can't decrypt the wire traffic; `conn.log` (TCP/9389) for ADWS. Whichever fires, correlate its timestamp/source IP back to the matching 1644 event to pull the actual query and set `protocol` accordingly. **Volume management:** cap the local `Directory Service` log (`wevtutil sl`, fixed max size, overwrite-oldest retention) so it never fills, and forward 1644 off the DC promptly (WEF or a log shipper) — the local copy only needs a short correlation window, not permanent history. **known gap:** for the ADWS case, the 1644 event's client IP may show the ADWS service process itself rather than the true remote caller, so correlate by timestamp rather than IP match there; not yet confirmed against a real ADWS query on this build | ready |
 
 ## Lateral movement
 
 | Detection | Log source | Status |
 |---|---|---|
 | WMI remote execution | WMI-Activity operational log + Sysmon Event 1 (child process of `WmiPrvSE.exe`) | ready |
-| Remote scheduled task creation | Windows Events — 4698 (scheduled task created) + 4624 (Logon Type 3) on the target | ready |
-| Remote service creation (including PsExec) | Windows Events — 7045 (service installed) + 4697 on the target | ready |
+| Remote scheduled task creation | Windows Events — 4698 (scheduled task created) correlated with a 4624 Logon Type 3 on the target in the preceding window — that correlation is what distinguishes this from the local-persistence variant below | ready |
+| Remote service creation (including PsExec) | Windows Events — 7045 (service installed) + 4697 on the target, correlated with a preceding remote logon (4624 Logon Type 3, or Type 10 for PsExec-style remote admin sessions) — that correlation is what distinguishes this from the local-persistence variant below | ready |
 
 ## AD persistence & privilege escalation
 
 | Detection | Log source | Status |
 |---|---|---|
-| Rogue machine account creation | Windows Events — 4741 (computer account created) | ready |
+| Rogue machine account creation | Windows Events — 4741 (computer account created) — legitimate machine account creation doesn't happen in this range post-provisioning, same reasoning as the ACL/delegation row below, so alert on every occurrence with no filtering | ready |
 | New Domain Admin / privileged group membership change | Windows Events — 4720 (user created) + 4728/4732/4756 (member added to a security-enabled group) | ready |
 | RBCD configuration write | Windows Events — 5136 (directory service object modified, `msDS-AllowedToActOnBehalfOfOtherIdentity`) | ready |
 | ACL / delegation abuse (DACL rights granted) | Windows Events — 5136 (directory service object modified, `nTSecurityDescriptor`), monitored on **every** occurrence — legitimate ACL edits in this range should be effectively zero after initial provisioning (no ongoing AD administration), so filtering to specific rights/GUIDs isn't necessary the way it would be in a live production domain | ready |
-| Logon script or ScriptPath tampering | Windows Events — 4663 (SACL, write to a NETLOGON script) + 5136 (`scriptPath` attribute modified) | ready |
+| Logon script tampering | Windows Events — 4663 (SACL, write to a NETLOGON script) | ready |
+| ScriptPath attribute tampering | Windows Events — 5136 (`scriptPath` attribute modified) | ready |
 
 ## Defense evasion
 
 | Detection | Log source | Status |
 |---|---|---|
-| Event log clearing | Windows Events — 1102 (audit log cleared) + System log 104 | ready |
+| Event log clearing | Windows Events — 1102 (audit log cleared) + System log 104 (log file cleared) — both fire only on an explicit clear action (`wevtutil cl`, Event Viewer's "Clear Log"), not on normal size-based log rotation/overwrite, so no exclusions are needed | ready |
 | Security software tampering (stop service, modify registry, uninstall) | Windows Events — 7040 (service start-type changed) + 4657 (SACL on the `WinDefend`/`WdNisSvc`/`Sense` registry keys) + Defender's own tamper-protection events (5001-5013) — scoped to Defender only, since that's the only security product in this range | ready |
 
 ## Host persistence
 
 | Detection | Log source | Status |
 |---|---|---|
-| Local scheduled task persistence | Windows Events — 4698 (scheduled task created) | ready |
-| Malicious local service creation | Windows Events — 7045 (service installed) + 4697 | ready |
+| Local scheduled task persistence | Windows Events — 4698 (scheduled task created) with no correlated remote logon (4624 Logon Type 3) in the preceding window — see Lateral movement above for the distinguishing correlation | ready |
+| Malicious local service creation | Windows Events — 7045 (service installed) + 4697, with no correlated remote logon — see Lateral movement above for the distinguishing correlation | ready |
 | WMI event subscription persistence | Sysmon — Events 19/20/21 (WmiEvent: filter/consumer/binding created) — requires the WMI event tracing subscriptions to be turned on in the Sysmon config | ready |
 
 ## Linux (service-abuse host)
