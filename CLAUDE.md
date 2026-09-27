@@ -128,6 +128,20 @@ scoped to source IP + the planner's fields) came out of this same pass.
   CLAUDE.md's "Zeek sourcetype/field-extraction incident" for why). Verify
   a field's real extracted name with `| fieldsummary` before assuming the
   dotted form works.
+- **One YAML file per detection, not one giant savedsearches.conf.**
+  Modeled on (a much smaller-scoped version of) how
+  [splunk/security_content](https://github.com/splunk/security_content)
+  structures its own detections — a `detections/<category>/<slug>.yml` per
+  detection (schema: `name`, `id`, `search`, `description`,
+  `known_false_positives`, a `verification` block, etc. — see any existing
+  file for the exact fields), compiled by `build/build_app.py` into
+  `app/default/savedsearches.conf`. That generated file is never
+  hand-edited. This was a deliberate choice (2026-09-27, mid-implementation)
+  over the single-file approach the first two detections (Ping Sweep, Port
+  Scan) originally shipped with — one file per detection scales far better
+  once dozens exist, and keeps each detection's SPL, tuning history, and
+  verification evidence together in one reviewable place instead of
+  scattered across a shared file's stanzas.
 
 ## Status
 

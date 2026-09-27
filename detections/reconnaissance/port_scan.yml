@@ -1,0 +1,59 @@
+name: Port Scan
+id: recon-port-scan
+version: 1
+date: '2026-09-27'
+status: production
+category: reconnaissance
+description: >-
+  One source touching 15+ distinct ports on any range host, or 6+ distinct
+  range hosts on the same port(s), within a 30s window.
+data_source:
+  - Zeek conn.log (proto=tcp or udp)
+search: |-
+  index=zeek sourcetype=zeek:conn (proto=tcp OR proto=udp) id_resp_h=10.0.2.* NOT id_resp_p=123
+  | bucket _time span=30s
+  | stats dc(id_resp_p) as distinct_ports dc(id_resp_h) as distinct_hosts values(id_resp_h) as hosts values(id_resp_p) as ports by _time id_orig_h
+  | where distinct_ports>=15 OR distinct_hosts>=6
+  | table id_orig_h distinct_ports distinct_hosts hosts ports
+how_to_implement: >-
+  Requires defense-tooling's Zeek sensor forwarding conn.log, plus this
+  repo's search-time field extraction fix (see CLAUDE.md's "Zeek
+  sourcetype/field-extraction incident"). Deliberately scoped to
+  id_resp_h=10.0.2.* (the cyberhawks.lab range) -- see known_false_positives
+  for why an unscoped version doesn't work.
+known_false_positives: >-
+  An earlier, unscoped version (no id_resp_h restriction) false-positived on
+  ordinary internet browsing to multi-IP CDNs from unrelated student VMs on
+  the same Proxmox host (6+ distinct external IPs on ports 443/53 in 30s is
+  normal for that). Scoping to the range subnet fixed this. Separately,
+  dc1/dc2 legitimately resolve time.windows.com/time.google.com/pool.ntp.org
+  to several distinct IPs on every NTP sync (see cyber-range CLAUDE.md's
+  "Monitoring rollout plan" section), which also tripped the distinct_hosts
+  threshold -- excluded via NOT id_resp_p=123. No false positives found over
+  2h of normal range background traffic once both fixes were in place.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611)
+  technique:
+    - 'nmap -p 445 -n --open 10.0.2.2-8 (port sweep across all 7 hosts)'
+    - 'nmap -p 1-1000 -n --open -Pn 10.0.2.8 (port sweep on one host)'
+  result: >-
+    Each fired exactly once when run in isolation (distinct_hosts=7 for the
+    first; distinct_ports=999 for the second). Also confirmed both run
+    back-to-back land in the same 30s bucket and correctly merge into one
+    alert covering the whole burst, rather than duplicating.
+embed:
+  title: TBD -- pending the Alert Embed Planner
+  additional_fields:
+    - distinct_ports
+    - distinct_hosts
+    - hosts
+    - ports
+references:
+  - detections/backlog.md, "Reconnaissance & discovery"
+schedule:
+  cron: '*/1 * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

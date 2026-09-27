@@ -1,0 +1,47 @@
+name: Ping Sweep
+id: recon-ping-sweep
+version: 1
+date: '2026-09-27'
+status: production
+category: reconnaissance
+description: >-
+  One source pinging 5+ distinct hosts within a 10s window.
+data_source:
+  - Zeek conn.log (proto=icmp)
+search: |-
+  index=zeek sourcetype=zeek:conn proto=icmp
+  | bucket _time span=10s
+  | stats dc(id_resp_h) as distinct_hosts values(id_resp_h) as hosts by _time id_orig_h
+  | where distinct_hosts>=5
+  | table id_orig_h distinct_hosts hosts
+how_to_implement: >-
+  Requires defense-tooling's Zeek sensor forwarding conn.log, plus this
+  repo's search-time field extraction fix (see CLAUDE.md's "Zeek
+  sourcetype/field-extraction incident" for why Splunk_TA_zeek's own
+  INDEXED_EXTRACTIONS doesn't work against this range's data, and why
+  fields use underscores, e.g. id_resp_h, not the dotted Zeek/CIM form).
+known_false_positives: >-
+  None found over 1h of normal range background traffic. IPv6 router
+  solicitation ICMP (to ff02::2) doesn't touch 5+ distinct unicast hosts,
+  so it doesn't trip this.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611)
+  technique: 'nmap -sn 10.0.2.2-8'
+  result: >-
+    Fired exactly once -- 6 distinct hosts in one 10s bucket (the 7th
+    host's ICMP reply landed in an adjacent bucket, a timing artifact of
+    when nmap's individual echo requests went out, not a detection gap).
+embed:
+  title: TBD -- pending the Alert Embed Planner
+  additional_fields:
+    - distinct_hosts
+    - hosts
+references:
+  - detections/backlog.md, "Reconnaissance & discovery"
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

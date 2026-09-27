@@ -11,13 +11,15 @@ Log sources assume the add-ons documented in `defense-tooling`'s
 
 Detections that have graduated out of this backlog — real SPL, run and
 verified against the live range, per the README's "Contributing a
-detection" process. Live in `app/default/savedsearches.conf`; removed from
-their category table below.
+detection" process. Each has its own YAML file under `detections/<category>/`
+(the actual source of truth — full SPL, false-positive notes, verification
+details), compiled into `app/default/savedsearches.conf`. Removed from their
+category table below.
 
-| Detection | Verified | Notes |
-|---|---|---|
-| Ping Sweep | 2026-09-27 | Live `nmap -sn` sweep from john-kali against all 7 range hosts, fired exactly once, no false positives over 1h |
-| Port Scan | 2026-09-27 | Live `nmap -p 445` sweep + `nmap -p 1-1000` single-host scan from john-kali, each fired exactly once; needed scoping to the range subnet + an NTP exclusion to kill false positives (see savedsearches.conf's description for both) |
+| Detection | Verified | YAML | Notes |
+|---|---|---|---|
+| Ping Sweep | 2026-09-27 | [reconnaissance/ping_sweep.yml](reconnaissance/ping_sweep.yml) | Live `nmap -sn` sweep from john-kali against all 7 range hosts, fired exactly once, no false positives over 1h |
+| Port Scan | 2026-09-27 | [reconnaissance/port_scan.yml](reconnaissance/port_scan.yml) | Live `nmap -p 445` sweep + `nmap -p 1-1000` single-host scan from john-kali, each fired exactly once; needed scoping to the range subnet + an NTP exclusion to kill false positives |
 
 ## Zeek logs actually needed
 
