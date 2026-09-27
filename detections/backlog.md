@@ -28,6 +28,8 @@ category table below.
 | Kerberoast | 2026-09-27 | [weak-auth/kerberoast.yml](weak-auth/kerberoast.yml) | Live `impacket-GetUserSPNs` against both real user-SPN accounts (crackme, svc-mssql) using asmith's cracked password, fired exactly once. Needed a real fix mid-design: filtering by the *requesting* account (`NOT Account_Name="*$@*"`) still false-positived on a human admin's normal logon triggering machine-account service tickets — switched to filtering by the *target* Service_Name (`NOT Service_Name="*$"`) instead, since machine accounts requesting tickets to each other is the actual baseline noise pattern, not who's asking |
 | Zone transfer (AXFR) | 2026-09-27 | [weak-auth/zone_transfer.yml](weak-auth/zone_transfer.yml) | Live `dig axfr cyberhawks.lab @10.0.2.2` (dc1's real IP — a prior memory snapshot had this wrong as 10.0.2.4), full unauthenticated zone dump retrieved, fired exactly once, worked as originally designed |
 | Password spray / guessable password | 2026-09-27 | [weak-auth/password_spray.yml](weak-auth/password_spray.yml) | Live `netexec smb` (NTLM vector) and `kerbrute passwordspray` (Kerberos vector), both against a 20-name wordlist with the real weak-cred pool password `Summer2026`, each fired exactly once. Needed an exclusion for netexec's own ANONYMOUS LOGON null-session probe. **Documented, not fixed:** asmith (the no-preauth account) always shows as a false "success" for any Kerberos-vector spray that includes it, since a no-preauth account's AS-REQ always looks successful regardless of the guessed password |
+| Pre-2000 / blank password | 2026-09-27 | [weak-auth/computer_password_spray.yml](weak-auth/computer_password_spray.yml) | Named "Computer Password Spray" per the Alert Embed Planner. Live `impacket-getTGT` against computer4 (pre-2k default password) and `netexec smb` against computer5 (blank password), fired exactly once. No threshold needed — computer4/computer5 are placeholder AD objects with no real host, so any successful auth at all is the signal |
+| NetNTLMv1 permitted | 2026-09-27 | [weak-auth/netntlmv1_authentication.yml](weak-auth/netntlmv1_authentication.yml) | Live `smbclient` with NTLMv2 disabled client-side, forcing a real NTLMv1 auth to dc1, fired exactly once. Needed real exclusions: NTLMv1 turned out to be common baseline noise in this range (routine dc2$-to-dc1 inter-DC traffic and anonymous/null-session logons both use it, a side effect of the domain-wide `LmCompatibilityLevel=1` weakening) — scoped to named non-machine accounts only |
 
 ## Zeek logs actually needed
 
@@ -72,9 +74,7 @@ simply won't arrive in Splunk.
 
 | Detection | Log source | Status |
 |---|---|---|
-| Pre-2000 / blank password | Windows Events — 4624 | ready |
 | Anonymous logon / null session | Zeek `dce_rpc.log` — the specific enumeration calls an anonymous/null session actually enables: MS-LSAT `LsarLookupSids` and MS-SAMR `SamrEnumerateUsersInDomain` (mirroring what NetExec's `--users`/`--groups`/trust-enumeration switches call), plus their group and trust equivalents; correlate to the target's 4624 anonymous logon for session context | ready |
-| NetNTLMv1 permitted | Windows Events — 4624, the `Package Name (NTLM only)` field = `NTLM V1` (corrected from an earlier draft that referenced 8004, which doesn't reliably break out NTLM version) | ready |
 
 ## NTLM relay & coercion
 

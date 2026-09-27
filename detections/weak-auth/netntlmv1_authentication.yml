@@ -1,0 +1,68 @@
+name: NetNTLMv1 Authentication
+id: weak-auth-netntlmv1
+version: 1
+date: '2026-09-27'
+status: production
+category: weak-auth
+description: >-
+  A named-account NTLM logon (4624) negotiated down to NTLMv1 -- both DCs
+  have `LmCompatibilityLevel=1`, permitting the far weaker, much more
+  crackable NTLMv1 response instead of rejecting it and requiring NTLMv2.
+  Scoped to real user/service accounts; excludes anonymous/null-session
+  and machine-to-machine NTLMv1 traffic, which happen constantly in this
+  range's baseline (see known_false_positives) as a side effect of the
+  same domain-wide weakening and aren't a distinct actionable signal on
+  their own.
+data_source:
+  - >-
+    Windows Events -- 4624, `Package Name (NTLM only)` = NTLM V1
+search: |-
+  index=windows EventCode=4624 Package_Name__NTLM_only_="NTLM V1"
+  | eval target_user=mvindex(Account_Name, -1)
+  | where target_user!="-" AND target_user!="ANONYMOUS LOGON" AND NOT match(target_user, "\$$")
+  | rename Source_Network_Address as ip, ComputerName as host, target_user as user
+  | table ip host user
+how_to_implement: >-
+  Requires defense-tooling's Windows forwarder shipping Security log 4624
+  from the DCs (already forwarded). No infra fix needed. The
+  `target_user`/`$`-suffix/`ANONYMOUS LOGON` exclusions are required -- see
+  known_false_positives, this is a genuinely noisy raw signal in this
+  range.
+known_false_positives: >-
+  Investigated 24h of baseline NTLM V1 traffic before finalizing this --
+  it's surprisingly common here, *not* a clean signal on its own. dc2$
+  authenticates to dc1 over NTLMv1 as part of routine inter-DC traffic (5
+  occurrences in 24h), and anonymous/null-session NTLMv1 logons
+  (Account_Name "-" or "ANONYMOUS LOGON") occur from both DCs to each
+  other and from this session's own attacker-tooling test traffic
+  (netexec's null-session probes) -- both are side effects of
+  `LmCompatibilityLevel=1` being set domain-wide rather than a distinct
+  attack signal, and anonymous/null-session activity already has its own
+  dedicated detection (SMB Anonymous Object Enumeration). Excluding
+  machine accounts and anonymous/null logons leaves zero false positives
+  in the same 24h window.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    smbclient -L //10.0.2.2/ -U cyberhawks.lab/dsmith%Summer2026
+    --option="client ntlmv2 auth=no" --option="client lanman auth=yes"
+    -m NT1 (forces the Samba client to send an NTLMv1 response instead of
+    its NTLMv2 default)
+  result: >-
+    Authenticated successfully; the resulting 4624 confirmed
+    Package_Name__NTLM_only_="NTLM V1". Fired exactly once.
+embed:
+  title: NetNTLMv1 Authentication
+  additional_fields:
+    - host
+    - user
+references:
+  - 'detections/backlog.md, "Weak / missing authentication" (backlog row: "NetNTLMv1 permitted")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false
