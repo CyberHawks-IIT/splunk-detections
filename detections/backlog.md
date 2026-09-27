@@ -30,6 +30,7 @@ category table below.
 | Password spray / guessable password | 2026-09-27 | [weak-auth/password_spray.yml](weak-auth/password_spray.yml) | Live `netexec smb` (NTLM vector) and `kerbrute passwordspray` (Kerberos vector), both against a 20-name wordlist with the real weak-cred pool password `Summer2026`, each fired exactly once. Needed an exclusion for netexec's own ANONYMOUS LOGON null-session probe. **Documented, not fixed:** asmith (the no-preauth account) always shows as a false "success" for any Kerberos-vector spray that includes it, since a no-preauth account's AS-REQ always looks successful regardless of the guessed password |
 | Pre-2000 / blank password | 2026-09-27 | [weak-auth/computer_password_spray.yml](weak-auth/computer_password_spray.yml) | Named "Computer Password Spray" per the Alert Embed Planner. Live `impacket-getTGT` against computer4 (pre-2k default password) and `netexec smb` against computer5 (blank password), fired exactly once. No threshold needed — computer4/computer5 are placeholder AD objects with no real host, so any successful auth at all is the signal |
 | NetNTLMv1 permitted | 2026-09-27 | [weak-auth/netntlmv1_authentication.yml](weak-auth/netntlmv1_authentication.yml) | Live `smbclient` with NTLMv2 disabled client-side, forcing a real NTLMv1 auth to dc1, fired exactly once. Needed real exclusions: NTLMv1 turned out to be common baseline noise in this range (routine dc2$-to-dc1 inter-DC traffic and anonymous/null-session logons both use it, a side effect of the domain-wide `LmCompatibilityLevel=1` weakening) — scoped to named non-machine accounts only |
+| Anonymous logon / null session | 2026-09-27 | [weak-auth/smb_anonymous_object_enumeration.yml](weak-auth/smb_anonymous_object_enumeration.yml) | Named "SMB Anonymous Object Enumeration" per the Alert Embed Planner. Live `netexec --users` and `impacket-samrdump` (zero credentials), both fired. **Design deviation from the original backlog wording, verified not just assumed:** MS-LSAT `LsarLookupSids` returns STATUS_ACCESS_DENIED anonymously in this range (confirmed via `impacket-lookupsid`) even though MS-SAMR's enumeration calls work anonymously with no restriction — scoped to the SAMR calls that are actually reachable, dropped the LSA leg |
 
 ## Zeek logs actually needed
 
@@ -72,9 +73,8 @@ simply won't arrive in Splunk.
 
 ## Weak / missing authentication
 
-| Detection | Log source | Status |
-|---|---|---|
-| Anonymous logon / null session | Zeek `dce_rpc.log` — the specific enumeration calls an anonymous/null session actually enables: MS-LSAT `LsarLookupSids` and MS-SAMR `SamrEnumerateUsersInDomain` (mirroring what NetExec's `--users`/`--groups`/trust-enumeration switches call), plus their group and trust equivalents; correlate to the target's 4624 anonymous logon for session context | ready |
+All 7 detections in this category have graduated — see the "Implemented"
+section above.
 
 ## NTLM relay & coercion
 

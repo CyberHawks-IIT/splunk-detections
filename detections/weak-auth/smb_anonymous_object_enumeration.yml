@@ -1,0 +1,73 @@
+name: SMB Anonymous Object Enumeration
+id: weak-auth-smb-anonymous-object-enumeration
+version: 1
+date: '2026-09-27'
+status: production
+category: weak-auth
+description: >-
+  An unauthenticated (null-session) SAMR call that enumerates domain
+  objects -- SamrEnumerateUsersInDomain (the full account list) or
+  SamrEnumerateAliasesInDomain/SamrEnumerateGroupsInDomain (group
+  membership) -- against a DC. This range has ANONYMOUS LOGON added to
+  Pre-Windows 2000 Compatible Access, which grants exactly this: an
+  unauthenticated session can open the SAM and enumerate accounts/groups
+  with no credentials at all.
+data_source:
+  - >-
+    Zeek dce_rpc.log, endpoint=samr, operation IN
+    (SamrEnumerateUsersInDomain, SamrEnumerateGroupsInDomain,
+    SamrEnumerateAliasesInDomain)
+search: |-
+  index=zeek sourcetype=zeek:dce_rpc endpoint=samr (operation=SamrEnumerateUsersInDomain OR operation=SamrEnumerateGroupsInDomain OR operation=SamrEnumerateAliasesInDomain)
+  | eval objects=case(operation="SamrEnumerateUsersInDomain","users", operation="SamrEnumerateGroupsInDomain","groups", operation="SamrEnumerateAliasesInDomain","groups", 1=1, operation)
+  | bucket _time span=1m
+  | stats values(objects) as objects by _time id_orig_h id_resp_h
+  | rename id_resp_h as host
+  | table id_orig_h host objects
+how_to_implement: >-
+  Requires defense-tooling's Zeek sensor forwarding dce_rpc.log (already
+  forwarded, already used by the DCSync/ADCS rows in this backlog). No
+  infra fix needed.
+known_false_positives: >-
+  None found -- zero SAMR enumeration calls of any kind in 24h of range
+  background traffic before this session's live test, from any source.
+  **Real, verified design deviation from the original backlog wording, not
+  a gap:** the backlog/planner described this keying on MS-LSAT
+  `LsarLookupSids` (the LSA-side call) alongside SAMR enumeration. Live
+  testing found `LsarLookupSids` returns STATUS_ACCESS_DENIED for an
+  anonymous session in this range (confirmed via impacket-lookupsid) even
+  though the SAMR calls above work anonymously with no restriction --
+  "Network access: Allow anonymous SID/Name translation" and the
+  SAM-enumeration right the Pre-2000-Compatible-Access group grants are
+  two independent Windows security-policy settings, and only the latter is
+  configured here. Scoped this detection to what's actually reachable
+  anonymously in this range (SAMR only) rather than including an LSA leg
+  that can never fire. Trust enumeration (the third "objects" category the
+  planner mentioned) wasn't included for the same reason plus this domain
+  having no trusts to enumerate in the first place -- nothing to verify
+  against.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique:
+    - 'netexec smb 10.0.2.2 -u "" -p "" --users (anonymous SAM user enumeration)'
+    - 'impacket-samrdump cyberhawks.lab/@10.0.2.2 -no-pass (users + groups + aliases, no credentials)'
+  result: >-
+    Both retrieved the full account list (513+ entries) with zero
+    credentials. Fired 3 times total across the two runs (each merged
+    correctly into one alert per 1-minute bucket), objects correctly
+    showing ["groups","users"] for the samrdump run.
+embed:
+  title: SMB Anonymous Object Enumeration
+  additional_fields:
+    - host
+    - objects
+references:
+  - 'detections/backlog.md, "Weak / missing authentication" (backlog row: "Anonymous logon / null session")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false
