@@ -51,3 +51,15 @@ capture real reasoning that would otherwise be lost.
 Design/backlog phase only — see `detections/backlog.md`. No real
 implementation (SPL, saved searches, a deployable app) exists yet. See that
 repo's README for the planned structure once implementation starts.
+
+## Monitoring rollout plan (2026-09-27)
+
+This repo is **step 5** of a 5-step plan documented in full in
+`cyber-range`'s CLAUDE.md under "Monitoring rollout plan" — that's the hub;
+this note is just the pointer. Steps 1-4 (installing forwarders, turning on
+the log sources this backlog depends on, minimal forwarding, and organizing
+the data in Splunk) happen in `cyber-range` and `defense-tooling` first —
+starting real implementation here before that data is actually flowing
+means writing SPL against nothing, which is exactly the kind of
+unverifiable "trust me" content the Conventions section above says not to
+add.
