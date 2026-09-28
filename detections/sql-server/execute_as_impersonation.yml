@@ -1,0 +1,67 @@
+name: EXECUTE AS Impersonation
+id: sql-server-execute-as-impersonation
+version: 1
+date: '2026-09-27'
+status: production
+category: sql-server
+description: >-
+  A T-SQL `EXECUTE AS LOGIN` impersonation succeeding -- on sql1, a bug in
+  the `sa` login's own permission grants lets any authenticated login
+  impersonate `sa` outright, an instant path from "any domain user" to
+  `sysadmin`. This is the actual escalation step that everything else in
+  this category (xp_cmdshell, xp_dirtree, the linked-server pivot) chains
+  off of.
+data_source:
+  - >-
+    SQL Server Audit (`detection_impersonation_audit`), action_id = IMP,
+    a literal "EXECUTE AS" statement present
+search: |-
+  index=mssql sourcetype=mssql_audit action_id="IMP*" succeeded=1 statement="EXECUTE AS*"
+  | eval host=replace(source, "_mssql_audit", "")
+  | rex field=statement "EXECUTE AS LOGIN\s*=\s*.(?<impersonated>[^'\"]+)"
+  | rename server_principal_name as user
+  | bucket _time span=1m
+  | stats values(impersonated) as impersonated by _time host user
+  | table host user impersonated
+how_to_implement: >-
+  Requires defense-tooling's DB Connect setup already forwarding
+  `detection_impersonation_audit`'s output into the `mssql` index
+  (`mssql_audit` sourcetype) -- already live, no infra fix needed. The
+  `statement="EXECUTE AS*"` filter is required: SQL Server also logs
+  action_id=IMP for internal context switches with no literal statement
+  text (e.g. SQL Agent job execution running as `sa` against `msdb`) --
+  those aren't a T-SQL-level impersonation a user performed and are
+  excluded by requiring the statement text to actually be present.
+known_false_positives: >-
+  Investigated the raw action_id=IMP baseline before adding the
+  `statement="EXECUTE AS*"` filter: found regular background `sa`-to-`dbo`
+  events against `msdb` with no statement text at all (SQL Agent's own
+  internal impersonation, not a real EXECUTE AS call) -- excluded by the
+  filter above, confirmed zero false positives afterward. The 5 remaining
+  matches in 24h are all real: this session's 2 live tests plus 3 from an
+  earlier session's own build-verification pass (also dsmith -> sa),
+  correctly deduplicated per-minute rather than one alert per statement.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611), via impacket-mssqlclient as dsmith (Windows Auth)
+  technique: "EXECUTE AS LOGIN = 'sa' against sql1 (10.0.2.6), as dsmith"
+  result: >-
+    Real impersonation confirmed (subsequent xp_cmdshell/xp_dirtree/
+    OPENQUERY calls all ran in `sa`'s context). Fired exactly once per
+    test run, correctly attributing `user=CYBERHAWKS\dsmith`,
+    `impersonated=sa`.
+embed:
+  title: EXECUTE AS Impersonation
+  additional_fields:
+    - host
+    - user
+    - impersonated
+references:
+  - 'detections/backlog.md, "SQL Server" (backlog row: "EXECUTE AS impersonation")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

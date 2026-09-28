@@ -1,0 +1,73 @@
+name: xp_cmdshell Execution
+id: sql-server-xp-cmdshell
+version: 1
+date: '2026-09-27'
+status: production
+category: sql-server
+description: >-
+  `xp_cmdshell` invoked on a SQL Server instance -- arbitrary OS command
+  execution from within SQL Server, the classic escalation step once
+  `sysadmin` is reached (e.g. via `EXECUTE AS LOGIN='sa'` on sql1, which any
+  domain user can attempt since sql1 is open to Windows Auth by design).
+  Nothing in this range's normal operation ever calls this procedure.
+data_source:
+  - >-
+    SQL Server Extended Events (`detection_sql_text` session), sql_text
+    matching xp_cmdshell
+search: |-
+  index=mssql sourcetype=mssql_xe_text sql_text="*xp_cmdshell*" NOT username="svc-sqlmonitor"
+  | eval host=replace(source, "_mssql_xe_text", "")
+  | rename username as user, sql_text as command
+  | table host user command
+how_to_implement: >-
+  Requires defense-tooling's DB Connect setup already forwarding
+  `detection_sql_text`'s XE output into the `mssql` index (`mssql_xe_text`
+  sourcetype) -- already live, no infra fix needed for the data source
+  itself. `NOT username="svc-sqlmonitor"` excludes DB Connect's own
+  monitoring identity from ever matching (defensive; its queries are plain
+  SELECTs and would never actually contain "xp_cmdshell", but excluded on
+  principle same as other detections in this backlog exclude known
+  service/tooling accounts). **Operational gotcha hit this session, not a
+  detection-design issue:** repeatedly restarting splunkd (redeploying
+  savedsearches.conf for other detections) reset DB Connect's KV-store
+  checkpoints for these inputs to their 1900-01-01 default, forcing a full
+  re-scan of the accumulated `detection_sql_text*.xel` files that then
+  exceeded the connector's query timeout and looped on
+  `SQLTimeoutException` indefinitely. Fixed operationally (not a code
+  change) by stopping the XE session, clearing the old `.xel` files, and
+  restarting it -- not expected to recur under normal operation, but if
+  this input goes quiet again after a `splunk restart`, check
+  `splunk_app_db_connect_server.log` for the same timeout pattern before
+  assuming the detection itself is broken.
+known_false_positives: >-
+  None -- xp_cmdshell only appears in 24h of data when this session
+  actually called it (twice, both this session's own live tests). Note
+  `user` reflects the *execution context at the time xp_cmdshell ran*
+  (`sa`, since it always runs post-impersonation in this range's actual
+  attack chain), not the original login that got there -- correlate with
+  the EXECUTE AS Impersonation detection's output for the true actor
+  (`dsmith` in this range's design).
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611), via impacket-mssqlclient as dsmith (Windows Auth)
+  technique: >-
+    EXECUTE AS LOGIN = 'sa'; EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE;
+    EXEC xp_cmdshell 'whoami' -- against sql1 (10.0.2.6)
+  result: >-
+    Real command execution confirmed (`cyberhawks\svc-mssql`, sql1's own
+    service account, returned). Fired exactly once.
+embed:
+  title: xp_cmdshell Execution
+  additional_fields:
+    - host
+    - user
+    - command
+references:
+  - 'detections/backlog.md, "SQL Server" (backlog row: "xp_cmdshell execution")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

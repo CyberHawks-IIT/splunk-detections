@@ -1,0 +1,51 @@
+name: xp_dirtree Execution
+id: sql-server-xp-dirtree
+version: 1
+date: '2026-09-27'
+status: production
+category: sql-server
+description: >-
+  `xp_dirtree` invoked on a SQL Server instance -- filesystem enumeration
+  from within SQL Server (also a classic technique for coercing an outbound
+  UNC-path authentication, i.e. an NTLM-relay trigger). Same escalation
+  path as xp_cmdshell: reached via `EXECUTE AS LOGIN='sa'` on sql1.
+data_source:
+  - >-
+    SQL Server Extended Events (`detection_sql_text` session), sql_text
+    matching xp_dirtree
+search: |-
+  index=mssql sourcetype=mssql_xe_text sql_text="*xp_dirtree*" NOT username="svc-sqlmonitor"
+  | eval host=replace(source, "_mssql_xe_text", "")
+  | rex field=sql_text "xp_dirtree\s+'(?<path>[^']+)'"
+  | rename username as user
+  | table host user path
+how_to_implement: >-
+  Same data source and operational gotcha as xp_cmdshell Execution --
+  DB Connect's `detection_sql_text` XE input, already live. See that
+  detection's how_to_implement for the checkpoint/timeout note.
+known_false_positives: >-
+  None -- xp_dirtree only appears in 24h of data from this session's own
+  live test. Same `user`-reflects-execution-context caveat as xp_cmdshell
+  Execution applies here too.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611), via impacket-mssqlclient as dsmith (Windows Auth)
+  technique: >-
+    EXECUTE AS LOGIN = 'sa'; EXEC master..xp_dirtree 'C:\Windows', 1, 1 --
+    against sql1 (10.0.2.6)
+  result: 'Real directory listing returned (90+ entries under C:\Windows). Fired exactly once.'
+embed:
+  title: xp_dirtree Execution
+  additional_fields:
+    - host
+    - user
+    - path
+references:
+  - 'detections/backlog.md, "SQL Server" (backlog row: "xp_dirtree execution")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

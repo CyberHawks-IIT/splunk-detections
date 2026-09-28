@@ -1,0 +1,56 @@
+name: Linked Server Execution
+id: sql-server-linked-server-execution
+version: 1
+date: '2026-09-27'
+status: production
+category: sql-server
+description: >-
+  A query against a linked server (`OPENQUERY`) -- sql1's link to sql2 maps
+  all local logins to a fixed `sa` identity rather than delegating the
+  caller's own identity, so any `sysadmin` on sql1 (reached via the
+  EXECUTE AS chain) pivots straight to `sysadmin` on sql2 too, as a plain
+  domain user.
+data_source:
+  - >-
+    SQL Server Extended Events (`detection_sql_text` session), sql_text
+    matching OPENQUERY
+search: |-
+  index=mssql sourcetype=mssql_xe_text sql_text="*OPENQUERY*" NOT username="svc-sqlmonitor"
+  | eval host=replace(source, "_mssql_xe_text", "")
+  | rex field=sql_text "OPENQUERY\(\[?(?<linked>[^,\]]+)\]?,"
+  | rename username as user
+  | table host user linked
+how_to_implement: >-
+  Same data source and operational gotcha as xp_cmdshell Execution --
+  DB Connect's `detection_sql_text` XE input, already live. See that
+  detection's how_to_implement for the checkpoint/timeout note.
+known_false_positives: >-
+  None -- this linked server exists solely for this range's designed
+  vulnerability (per cyber-range's VULNERABLE_RANGE_PLAN.md), no legitimate
+  application queries it. Only this session's own live test appears in 24h
+  of data.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611), via impacket-mssqlclient as dsmith (Windows Auth)
+  technique: >-
+    EXECUTE AS LOGIN = 'sa'; SELECT * FROM OPENQUERY([sql2], 'SELECT
+    @@SERVERNAME') -- against sql1 (10.0.2.6)
+  result: >-
+    Real cross-server query confirmed (`SQL2` returned as the linked
+    server's own name). Fired exactly once, `linked` correctly extracted
+    as `sql2`.
+embed:
+  title: Linked Server Execution
+  additional_fields:
+    - host
+    - user
+    - linked
+references:
+  - 'detections/backlog.md, "SQL Server" (backlog row: "Linked server command execution")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

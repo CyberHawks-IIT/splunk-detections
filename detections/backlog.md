@@ -22,6 +22,10 @@ category table below.
 | Port Scan | 2026-09-27 | [reconnaissance/port_scan.yml](reconnaissance/port_scan.yml) | Live `nmap -p 445` sweep + `nmap -p 1-1000` single-host scan from john-kali, each fired exactly once; needed scoping to the range subnet + an NTP exclusion to kill false positives |
 | Relayed SMB or LDAP connection | 2026-09-27 | [ntlm/ntlm_authentication.yml](ntlm/ntlm_authentication.yml) | Named "NTLM Authentication" per the Alert Embed Planner — detects any anomalous-source NTLM auth, not just completed relays. Live Responder+ntlmrelayx relay (HTTP trigger -> LDAP on dc1) from the `test` box, plus a direct netexec SMB auth from john-kali; baseline NTLM frequency investigated first (zero in 3h+ of idle range operation) — needed an exclusion for this control host's own admin traffic (NAT'd to the gateway IP, 10.0.2.1) |
 | Attacker-added DNS record | 2026-09-27 | [ntlm/dns_record_creation.yml](ntlm/dns_record_creation.yml) | Named "DNS Record Creation". Required a bigger infra fix than expected: "Directory Service Changes" auditing alone doesn't produce any 5136/5137 events without an object-level SACL, and the only existing SACL (on the Default Domain Policy GPO, for ACL/DACL Modification) doesn't cascade — added a new SACL scoped to the DNS zone partition object. **This same root cause likely blocks RBCD Configuration, Shadow Credential Creation, and ScriptPath Attribute Tampering too** — each needs its own object SACL, don't assume any of them already work. Live `dnstool.py` record creation from john-kali, fired exactly once. **Documented gap:** the planner's `ip` field isn't obtainable — Windows logs the DNS record's actual value as opaque `<Binary>`; also no source IP exists on this event type at all, `user` is the only attribution available |
+| `xp_cmdshell` execution | 2026-09-27 | [sql-server/xp_cmdshell_execution.yml](sql-server/xp_cmdshell_execution.yml) | Live `EXECUTE AS LOGIN='sa'` + `sp_configure`-enabled `xp_cmdshell` on sql1 as dsmith, real command output confirmed, fired exactly once. Hit a real operational issue mid-session (not a design flaw): repeated `splunk restart`s reset DB Connect's checkpoints, forcing a re-scan of accumulated XE trace files that then timed out indefinitely — fixed by clearing the old `.xel` files and restarting the XE session |
+| `xp_dirtree` execution | 2026-09-27 | [sql-server/xp_dirtree_execution.yml](sql-server/xp_dirtree_execution.yml) | Same escalation chain and same XE data source as xp_cmdshell. Live directory enumeration on sql1, fired exactly once |
+| `EXECUTE AS` impersonation | 2026-09-27 | [sql-server/execute_as_impersonation.yml](sql-server/execute_as_impersonation.yml) | The actual escalation step the other 3 SQL Server detections chain off of. Needed a filter for SQL Agent's own internal `sa`-context-switch noise (action_id=IMP with no statement text) — required a literal `EXECUTE AS` statement to be present. Live `dsmith` -> `sa` impersonation, fired exactly once per test, correctly deduplicated per-minute |
+| Linked server command execution | 2026-09-27 | [sql-server/linked_server_execution.yml](sql-server/linked_server_execution.yml) | Live `OPENQUERY` pivot from sql1 to sql2 as `sa`, fired exactly once, `linked` correctly extracted as `sql2` |
 | SAM hive dumping | 2026-09-27 | Split into two: [credential-dumping/sam_lsa_dump_registry_export.yml](credential-dumping/sam_lsa_dump_registry_export.yml) (as "SAM/LSA Dump: Registry Export") and [credential-dumping/sam_dump_registry_query.yml](credential-dumping/sam_dump_registry_query.yml) (as "SAM Dump: Registry Query") | Two independent local dumping techniques, each with different telemetry. `reg save` (export) needed a 3-part infra fix (Sensitive Privilege Use auditing + FullPrivilegeAuditing LSA value + a forwarder whitelist gap for 4673/4674) and still can't name which hive was read — merged with LSA into one alert. Direct registry query (as SYSTEM) worked as originally designed and correctly names the hive, so it stays a separate alert per hive. Live-tested both ways on workstation with Defender real-time monitoring disabled. |
 | LSA hive dumping (incl. LSA secrets) | 2026-09-27 | See SAM hive dumping row above — same split applies (Registry Export merged with SAM; [credential-dumping/lsa_dump_registry_query.yml](credential-dumping/lsa_dump_registry_query.yml) as "LSA Dump: Registry Query" for the distinguishable technique) | — |
 | DPAPI masterkey / credential file theft | 2026-09-27 | [credential-dumping/dpapi_dump.yml](credential-dumping/dpapi_dump.yml) | Live masterkey + credential-blob file reads on workstation, fired exactly once, no false positives over 4h — worked as originally designed |
@@ -85,14 +89,10 @@ section above.
 
 ## SQL Server
 
-> All four of these need the SQL Server Audit/Extended Events source, which isn't wired up yet — see `defense-tooling`'s open items (SQL Server Audit/Extended Events aren't plain text, need the Splunkbase SQL Server add-on or custom scripting).
-
-| Detection | Log source | Status |
-|---|---|---|
-| `xp_cmdshell` execution | SQL Server Audit / Extended Events | ready |
-| `xp_dirtree` execution | SQL Server Audit / Extended Events | ready |
-| `EXECUTE AS` impersonation | SQL Server Audit / Extended Events | ready |
-| Linked server command execution | SQL Server Audit / Extended Events | ready |
+All 4 detections in this category have graduated — see the "Implemented"
+section above. (The SQL Server Audit/Extended Events source this category
+needed was wired up by `defense-tooling` in an earlier session; see that
+repo's CLAUDE.md, "IIS, SQL Server, and CA ingestion".)
 
 ## Web application
 
