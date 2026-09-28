@@ -1,0 +1,76 @@
+name: Event Log Clear
+id: defense-evasion-event-log-clear
+version: 1
+date: '2026-09-27'
+status: production
+category: defense-evasion
+description: >-
+  An explicit event log clear action (`wevtutil cl`, Event Viewer's "Clear
+  Log", `Clear-EventLog`) -- classic defense evasion, wiping evidence of
+  prior activity. Windows only ever clears a log this way on an explicit
+  action; ordinary size-based rotation/overwrite never generates these
+  events, so no exclusion is needed to avoid catching routine log
+  management.
+data_source:
+  - >-
+    Windows Events -- 1102 (audit log cleared, Security log specifically,
+    resolved account name) merged with System log 104 (any log cleared,
+    raw SID only) by host and time, so one alert covers every log a single
+    clear action touched
+search: |-
+  index=windows (EventCode=1102 OR EventCode=104)
+  | rex field=_raw "The (?<logcleared>\S+) log file was cleared"
+  | eval logcleared=coalesce(logcleared, if(EventCode=1102, "Security", null()))
+  | rex field=ComputerName "(?<host>[^.]+)"
+  | bucket _time span=1m
+  | stats values(logcleared) as logs values(Account_Name) as user by _time host
+  | table host user logs
+how_to_implement: >-
+  No infra fix needed -- both event types were already forwarded (1102 in
+  the Security whitelist, 104 in the System whitelist). **Real design
+  question from the planner, answered empirically, not assumed:** "does
+  Windows regularly clear logs on its own?" -- confirmed no, but this
+  project's OWN operational workflow does: the established snapshot-prep
+  cycle (clear logs immediately before every VM snapshot, documented in
+  this project's own memory) explicitly runs `wevtutil cl` across multiple
+  channels on every range host before each snapshot. Live testing found
+  18-26 pre-existing 1102/104 events per DC in the prior 24h from exactly
+  this workflow, not from any attacker activity or Windows housekeeping.
+  **Deliberately not excluded** -- there's no reliable way to distinguish
+  "this project's own maintenance log-clear" from "an attacker covering
+  their tracks" using only the account name (both could plausibly be
+  Administrator), and this pattern is itself a known, attributable,
+  intentional part of this project's workflow rather than noise to
+  suppress. Document this for whoever operates the range day to day:
+  expect this alert to fire around every snapshot cycle, and treat that as
+  confirmation the detection works, not a false positive to silence.
+  **Real Splunk gap, same pattern as other non-Security-log events:** 104
+  never resolves an account name (raw SID only) -- the merged `user` field
+  is only populated when the Security log itself is among the logs
+  cleared (which brings a 1102 event with a resolved name into the same
+  minute); clearing only e.g. the Application log alone reports no user.
+known_false_positives: >-
+  This project's own pre-snapshot log-clear workflow, expected and
+  intentional -- see how_to_implement.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: WinRM from the control host, as domain admin (simulating an attacker who has already achieved local admin and is covering their tracks)
+  technique: 'wevtutil cl Application, then wevtutil cl Security, on workstation'
+  result: >-
+    Fired exactly once, correctly merging both clears into a single alert
+    (logs=["Application","Security"]), with user=Administrator resolved
+    from the 1102 event.
+embed:
+  title: Event Log Clear
+  additional_fields:
+    - user
+    - logs
+references:
+  - 'detections/backlog.md, "Defense evasion" (backlog row: "Event log clearing")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

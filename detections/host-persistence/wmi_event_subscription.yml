@@ -1,0 +1,65 @@
+name: WMI Event Subscription Creation
+id: host-persistence-wmi-event-subscription
+version: 1
+date: '2026-09-27'
+status: production
+category: host-persistence
+description: >-
+  A permanent WMI event subscription created (`__EventFilter` +
+  `EventConsumer` + `__FilterToConsumerBinding`) -- a classic fileless
+  persistence technique that survives reboots and runs whenever its
+  trigger condition fires, with no scheduled task or service to find.
+data_source:
+  - >-
+    Sysmon Events 19/20/21 (WmiEvent: filter/consumer/binding created),
+    merged into one alert per creation event
+search: |-
+  index=windows sourcetype=XmlWinEventLog (EventID=19 OR EventID=20 OR EventID=21)
+  | rex field=_raw "Data Name='Name'>\s*\"(?<obj_name>[^\"]+)\""
+  | bucket _time span=1m
+  | stats values(User) as user values(eval(if(EventID=19,obj_name,null()))) as producer values(eval(if(EventID=20,obj_name,null()))) as consumer values(eval(if(EventID=21,"yes",null()))) as binding by _time host
+  | table host user producer consumer binding
+how_to_implement: >-
+  No infra fix needed -- Sysmon's `WmiEvents` rule group in
+  `sysmon_config.xml` already has an empty `onmatch="exclude"` filter
+  (meaning nothing is excluded, so every WMI filter/consumer/binding
+  creation is logged), and the Sysmon channel is already forwarded
+  in full. **Real field-extraction ambiguity found and worked around:**
+  Splunk's generic `Name` field for these XML events collides with the
+  unrelated `<Provider Name='Microsoft-Windows-Sysmon'>` system attribute
+  that shares the same XML attribute name, producing a spurious
+  "Microsoft-Windows-Sysmon" value alongside the real filter/consumer name
+  -- pulled the object name directly via `rex` against `_raw` instead of
+  relying on the ambiguous auto-extracted field.
+known_false_positives: >-
+  None expected -- no legitimate WMI-based automation is deployed in this
+  range.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: WinRM from the control host, as domain admin (simulating an attacker who has already achieved local admin)
+  technique: >-
+    Set-WmiInstance creating a `__EventFilter` ("EvilFilter"), a
+    `CommandLineEventConsumer` ("EvilConsumer", running `cmd.exe /c
+    whoami`), and the `__FilterToConsumerBinding` linking them, on
+    workstation
+  result: >-
+    Fired exactly once, correctly merging all three creation events into
+    one alert (producer=EvilFilter, consumer=EvilConsumer, binding=yes,
+    user=CYBERHAWKS\Administrator). All three WMI objects removed
+    afterward.
+embed:
+  title: WMI Event Subscription Creation
+  additional_fields:
+    - host
+    - producer
+    - consumer
+    - binding
+references:
+  - 'detections/backlog.md, "Host persistence" (backlog row: "WMI event subscription persistence")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

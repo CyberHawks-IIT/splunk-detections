@@ -59,6 +59,8 @@ category table below.
 | Remote service creation (including PsExec) | 2026-09-27 | [lateral-movement/service_creation.yml](lateral-movement/service_creation.yml) | Named "Lateral Movement: Service". Same control-host exclusion as the scheduled-task version. **Documented gap:** 7045 never resolves an account name (only a raw SID) — borrowed the resolved name from the correlated 4624 instead. Live `impacket-psexec` against sql1 (service "rubo", ran as SYSTEM), fired exactly once |
 | Local scheduled task persistence | 2026-09-27 | [host-persistence/scheduled_task_local.yml](host-persistence/scheduled_task_local.yml) | Named "Scheduled Task Creation (Local)". Shares its data source with the remote variant (inverted branch of the same join). **Real testing challenge solved:** a plain WinRM-created task always has its own near-simultaneous logon, which would look "remote" even with the exclusion in place — used the SYSTEM-scheduled-task double-hop pattern (an outer task whose action creates a second, inner task via the Task Scheduler engine's own Batch-context execution) to get a genuinely local-creation event, verified paired against the remote detection to confirm neither cross-fires |
 | Malicious local service creation | 2026-09-27 | [host-persistence/service_creation_local.yml](host-persistence/service_creation_local.yml) | Named "Service Creation (Local)". Same local-creation technique as the scheduled-task version. **Documented gap:** with no correlated 4624 available (that's the whole point of this branch), there's no way to resolve 7045's raw SID to a name at all — shipped without a `user` field rather than exposing a raw SID under that name |
+| Event log clearing | 2026-09-27 | [defense-evasion/event_log_clear.yml](defense-evasion/event_log_clear.yml) | Named "Event Log Clear". No infra fix needed. **Real finding, answering the planner's own question:** Windows itself never clears logs on its own, but this *project's* pre-snapshot maintenance workflow does (18-26 pre-existing clear events per DC in a 24h lookback, all from this session's own snapshot cycles) — deliberately left unexcluded since there's no reliable way to tell that apart from real track-covering by account name alone; documented as expected noise around every snapshot cycle instead. Live `wevtutil cl` on two logs, fired exactly once, correctly merging both into one alert |
+| WMI event subscription persistence | 2026-09-27 | [host-persistence/wmi_event_subscription.yml](host-persistence/wmi_event_subscription.yml) | Named "WMI Event Subscription Creation". No infra fix needed — Sysmon's WmiEvents rule group was already correctly configured to log everything. Live `Set-WmiInstance` creating a filter+consumer+binding, fired exactly once, correctly merging all three creation events into one alert |
 
 ## Zeek logs actually needed
 
@@ -171,19 +173,18 @@ tampering, and scriptPath tampering all graduated 2026-09-27 too -- see the
 
 ## Defense evasion
 
+Event log clearing graduated 2026-09-27 — see the "Implemented" section
+above.
+
 | Detection | Log source | Status |
 |---|---|---|
-| Event log clearing | Windows Events — 1102 (audit log cleared) + System log 104 (log file cleared) — both fire only on an explicit clear action (`wevtutil cl`, Event Viewer's "Clear Log"), not on normal size-based log rotation/overwrite, so no exclusions are needed | ready |
-| Security software tampering (stop service, modify registry, uninstall) | Windows Events — 7040 (service start-type changed) + 4657 (SACL on the `WinDefend`/`WdNisSvc`/`Sense` registry keys) + Defender's own tamper-protection events (5001-5013) — scoped to Defender only, since that's the only security product in this range | ready |
+| Security software tampering (stop service, modify registry, uninstall) | Windows Events — 7040 (service start-type changed) + 4657 (SACL on the `WinDefend`/`WdNisSvc`/`Sense` registry keys) + Defender's own tamper-protection events (5001-5013) — scoped to Defender only, since that's the only security product in this range | ready — **not live-tested**: the user's original task instructions explicitly ruled out testing registry/service/binary tampering against the Defender service specifically, since tamper protection blocks it |
 
 ## Host persistence
 
-Local scheduled task persistence and malicious local service creation
-graduated 2026-09-27 — see the "Implemented" section above.
-
-| Detection | Log source | Status |
-|---|---|---|
-| WMI event subscription persistence | Sysmon — Events 19/20/21 (WmiEvent: filter/consumer/binding created) — requires the WMI event tracing subscriptions to be turned on in the Sysmon config | ready |
+Local scheduled task persistence, malicious local service creation, and
+WMI event subscription persistence graduated 2026-09-27 — see the
+"Implemented" section above. This category is now fully graduated.
 
 ## Linux (service-abuse host)
 
