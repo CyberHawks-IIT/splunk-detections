@@ -24,6 +24,9 @@ category table below.
 | SAM hive dumping | 2026-09-27 | Split into two: [credential-dumping/sam_lsa_dump_registry_export.yml](credential-dumping/sam_lsa_dump_registry_export.yml) (as "SAM/LSA Dump: Registry Export") and [credential-dumping/sam_dump_registry_query.yml](credential-dumping/sam_dump_registry_query.yml) (as "SAM Dump: Registry Query") | Two independent local dumping techniques, each with different telemetry. `reg save` (export) needed a 3-part infra fix (Sensitive Privilege Use auditing + FullPrivilegeAuditing LSA value + a forwarder whitelist gap for 4673/4674) and still can't name which hive was read — merged with LSA into one alert. Direct registry query (as SYSTEM) worked as originally designed and correctly names the hive, so it stays a separate alert per hive. Live-tested both ways on workstation with Defender real-time monitoring disabled. |
 | LSA hive dumping (incl. LSA secrets) | 2026-09-27 | See SAM hive dumping row above — same split applies (Registry Export merged with SAM; [credential-dumping/lsa_dump_registry_query.yml](credential-dumping/lsa_dump_registry_query.yml) as "LSA Dump: Registry Query" for the distinguishable technique) | — |
 | DPAPI masterkey / credential file theft | 2026-09-27 | [credential-dumping/dpapi_dump.yml](credential-dumping/dpapi_dump.yml) | Live masterkey + credential-blob file reads on workstation, fired exactly once, no false positives over 4h — worked as originally designed |
+| NETLOGON script creds | 2026-09-27 | [credential-exposure/netlogon_share_read.yml](credential-exposure/netlogon_share_read.yml) | Named "NETLOGON Share Read" per the Alert Embed Planner. Needed a real infra fix: "Detailed File Share" auditing (needed for 5145) was not enabled anywhere in the range despite 5145 already being in the forwarder whitelist — fixed in cyber-range's `detection_logging` role, applied live to dc1/dc2/sql1. Live `smbclient` retrieval of skumar's leaked-cred NETLOGON script, fired exactly once |
+| GPP cpassword (SYSVOL) | 2026-09-27 | [credential-exposure/sysvol_share_read.yml](credential-exposure/sysvol_share_read.yml) | Named "SYSVOL Share Read". Same infra fix as above. Live `smbclient` retrieval of the GPP `Groups.xml`, fired exactly once. This GPO is genuinely linked to the Workstations OU, so real GPP client refresh traffic exists as machine-account ($) noise — excluded, and confirmed not just theoretical (this session's own `Get-GPOReport` diagnostic calls incidentally touched the same file) |
+| File share dump | 2026-09-27 | [credential-exposure/smb_share_dump.yml](credential-exposure/smb_share_dump.yml) | Named "SMB Share Dump". Same infra fix as above. Live `smbclient` retrieval of the leaked-cred file on sql1's Shared share, fired exactly once, no threshold needed |
 | ASREPRoast | 2026-09-27 | [weak-auth/asreproast.yml](weak-auth/asreproast.yml) | Named "AS-REP Roast" per the Alert Embed Planner. Live `impacket-GetNPUsers` against asmith (the range's dedicated no-preauth account) from john-kali, fired exactly once (2 4768s 11ms apart merged by a 1m bucket); worked as originally designed, no infra fix needed — confirmed zero Pre-Authentication-Type=0 events in 24h of background traffic beforehand |
 | Kerberoast | 2026-09-27 | [weak-auth/kerberoast.yml](weak-auth/kerberoast.yml) | Live `impacket-GetUserSPNs` against both real user-SPN accounts (crackme, svc-mssql) using asmith's cracked password, fired exactly once. Needed a real fix mid-design: filtering by the *requesting* account (`NOT Account_Name="*$@*"`) still false-positived on a human admin's normal logon triggering machine-account service tickets — switched to filtering by the *target* Service_Name (`NOT Service_Name="*$"`) instead, since machine accounts requesting tickets to each other is the actual baseline noise pattern, not who's asking |
 | Zone transfer (AXFR) | 2026-09-27 | [weak-auth/zone_transfer.yml](weak-auth/zone_transfer.yml) | Live `dig axfr cyberhawks.lab @10.0.2.2` (dc1's real IP — a prior memory snapshot had this wrong as 10.0.2.4), full unauthenticated zone dump retrieved, fired exactly once, worked as originally designed |
@@ -65,11 +68,8 @@ simply won't arrive in Splunk.
 
 > Description-field password lives under **Enumeration** below — it's an LDAP read, not a file share.
 
-| Detection | Log source | Status |
-|---|---|---|
-| NETLOGON script creds | Windows Events — 5145 | ready |
-| GPP cpassword (SYSVOL) | Windows Events — 5145 | ready |
-| File share dump | Windows Events — 5145 | ready |
+All 3 detections in this category have graduated — see the "Implemented"
+section above.
 
 ## Weak / missing authentication
 

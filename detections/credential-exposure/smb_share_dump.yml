@@ -1,0 +1,53 @@
+name: SMB Share Dump
+id: credential-exposure-smb-share-dump
+version: 1
+date: '2026-09-27'
+status: production
+category: credential-exposure
+description: >-
+  Any access to sql1's `Shared` file share -- 57 folders of realistic
+  filler content across HR/IT/Finance/Engineering/etc., with one real
+  leaked credential (`IT\PasswordResets\ResetLog_2026.txt`, the
+  smbshare-creds pool account's password) buried in it. Nothing in this
+  range legitimately uses this share day to day, so any access at all is
+  the signal -- no threshold needed.
+data_source:
+  - Windows Events -- 5145, Share Name = \\*\Shared (sql1)
+search: |-
+  index=windows EventCode=5145 Share_Name="\\\\*\\Shared"
+  | eval share=mvindex(split(Share_Name, "\\"), -1)
+  | bucket _time span=1m
+  | stats values(share) as share values(ComputerName) as host by _time Source_Address
+  | table Source_Address host share
+how_to_implement: >-
+  Same infra fix as NETLOGON Share Read / SYSVOL Share Read -- "Detailed
+  File Share" auditing was not enabled anywhere in the range; fixed in
+  cyber-range's `detection_logging` role and applied live to dc1/dc2/sql1
+  this session.
+known_false_positives: >-
+  None -- zero access to sql1's Shared share of any kind in 24h of range
+  background traffic before this session's live test (most of that window
+  predates the audit-policy fix, so this baseline is short).
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    smbclient //10.0.2.6/Shared -U CYBERHAWKS/user%password -c "get
+    IT\PasswordResets\ResetLog_2026.txt"
+  result: >-
+    Retrieved the file (jjohnson's leaked password, per cyber-range's own
+    build verification). Fired exactly once.
+embed:
+  title: SMB Share Dump
+  additional_fields:
+    - host
+    - share
+references:
+  - 'detections/backlog.md, "Credential exposure" (backlog row: "File share dump")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

@@ -1,0 +1,62 @@
+name: SYSVOL Share Read
+id: credential-exposure-sysvol-share-read
+version: 1
+date: '2026-09-27'
+status: production
+category: credential-exposure
+description: >-
+  A named (non-machine) account reading a Group Policy Preferences
+  `Groups.xml` file off SYSVOL -- in this range, the "Workstation Local
+  Admin Reset" GPO's Local Users and Groups preference, which contains an
+  encrypted `cpassword` that decrypts with Microsoft's long-published,
+  fixed AES key to a real password.
+data_source:
+  - Windows Events -- 5145, Share Name = \\*\SYSVOL, Relative Target Name matching *Groups.xml
+search: |-
+  index=windows EventCode=5145 Share_Name="\\\\*\\SYSVOL" Relative_Target_Name="*Groups.xml"
+  | where NOT match(Account_Name, "\$$")
+  | bucket _time span=1m
+  | stats values(Relative_Target_Name) as files values(ComputerName) as host by _time Source_Address
+  | table Source_Address host files
+how_to_implement: >-
+  Same infra fix as NETLOGON Share Read -- "Detailed File Share" auditing
+  was not enabled anywhere in the range; fixed in cyber-range's
+  `detection_logging` role and applied live to dc1/dc2/sql1 this session.
+known_false_positives: >-
+  This GPO is genuinely linked (to the `Workstations` OU, confirmed via
+  `Get-GPOReport`), so the real `workstation` host's own Group Policy
+  Preferences client-side extension legitimately pulls Groups.xml on its
+  normal refresh cycle -- that traffic authenticates as the machine
+  account (WORKSTATION$), which the `NOT match(Account_Name, "\$$")`
+  exclusion correctly filters out. Confirmed this isn't theoretical: this
+  session's own diagnostic `Get-GPOReport` calls (run as Administrator over
+  WinRM to inspect the GPO's link status) incidentally read the same
+  Groups.xml file 3 times as a side effect of building the report --
+  harmless investigation-time noise from this session, not a real
+  workstation refresh, but worth noting since it shows the file genuinely
+  gets touched by non-attacker activity and the account-name exclusion is
+  doing real work, not just defensive boilerplate.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    smbclient //10.0.2.2/SYSVOL -U CYBERHAWKS/user%password -c "get
+    ...\Machine\Preferences\Groups\Groups.xml"
+  result: >-
+    Retrieved the file; the cpassword inside decrypts to a real local
+    account password per cyber-range's own build verification. Fired
+    exactly once.
+embed:
+  title: SYSVOL Share Read
+  additional_fields:
+    - host
+    - files
+references:
+  - 'detections/backlog.md, "Credential exposure" (backlog row: "GPP cpassword (SYSVOL)")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

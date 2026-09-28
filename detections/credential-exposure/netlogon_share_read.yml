@@ -1,0 +1,58 @@
+name: NETLOGON Share Read
+id: credential-exposure-netlogon-share-read
+version: 1
+date: '2026-09-27'
+status: production
+category: credential-exposure
+description: >-
+  A named (non-machine) account reading a file off a DC's NETLOGON share --
+  in this range, `MapDrives.ps1`, skumar's logon script, which contains
+  cleartext credentials. NETLOGON only ever holds logon scripts, not
+  general-purpose files, and machine accounts don't execute user logon
+  scripts, so a real account reading anything there at all is the signal.
+data_source:
+  - Windows Events -- 5145, Share Name = \\*\NETLOGON
+search: |-
+  index=windows EventCode=5145 Share_Name="\\\\*\\NETLOGON"
+  | where NOT match(Account_Name, "\$$")
+  | bucket _time span=1m
+  | stats values(Relative_Target_Name) as files values(ComputerName) as host by _time Source_Address
+  | table Source_Address host files
+how_to_implement: >-
+  Required a real infra fix: "Detailed File Share" (and "File Share") audit
+  subcategory was not enabled on any range host despite 5145 already being
+  in defense-tooling's forwarder whitelist -- confirmed zero 5145 events of
+  any kind anywhere in the range before this fix, live-tested and
+  confirmed firing immediately after. See cyber-range's
+  `detection_logging` role (`configure_audit_policy.ps1`) -- now includes
+  both subcategories; applied live to dc1/dc2/sql1 this session. No SACL
+  needed on the individual share/files for this event type, unlike File
+  System (4663) auditing.
+known_false_positives: >-
+  None found -- zero NETLOGON share access of any kind in 24h of range
+  background traffic before this session's live test (most of that window
+  predates the audit-policy fix, so this baseline is short; revisit if
+  real domain background NETLOGON traffic ever shows up). Machine accounts
+  ($-suffixed) are excluded on principle even though none were observed --
+  they have no legitimate reason to read a per-user logon script.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    smbclient //10.0.2.2/NETLOGON -U CYBERHAWKS/user%password -c "get
+    MapDrives.ps1"
+  result: Retrieved the script (skumar's real leaked credentials). Fired exactly once.
+embed:
+  title: NETLOGON Share Read
+  additional_fields:
+    - host
+    - files
+references:
+  - 'detections/backlog.md, "Credential exposure" (backlog row: "NETLOGON script creds")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false
