@@ -1,0 +1,88 @@
+name: Name Resolution Poisoning
+id: recon-name-resolution-poisoning
+version: 1
+date: '2026-09-27'
+status: production
+category: reconnaissance
+description: >-
+  Any unicast (non-broadcast/multicast) traffic on LLMNR (5355), mDNS
+  (5353), or NBT-NS (137) between two real hosts. Nothing on this network
+  legitimately uses these protocols point-to-point -- normal LLMNR/mDNS/
+  NBT-NS traffic is always broadcast/multicast (queries go to
+  224.0.0.252/224.0.0.251/the subnet broadcast address, never a specific
+  host), so a direct host-to-host flow on these ports is either a
+  poisoning tool's fraudulent unicast answer, or a direct unicast query
+  used as a NetBIOS/mDNS enumeration technique -- both are attacker
+  activity.
+data_source:
+  - Zeek conn.log, destination port 5355, 5353, or 137, excluding broadcast/multicast destinations
+search: |-
+  index=zeek sourcetype=zeek:conn (id_resp_p=5355 OR id_resp_p=5353 OR id_resp_p=137) NOT id_resp_h="224.0.0.*" NOT id_resp_h="*.255" NOT id_resp_h="ff02:*"
+  | bucket _time span=1m
+  | stats values(id_resp_p) as ports by _time id_orig_h id_resp_h
+  | rename id_orig_h as host, id_resp_h as target
+  | table host target ports
+how_to_implement: >-
+  Required a real, significant infra fix, not just a config tweak:
+  `defense-tooling`'s existing mirroring (`setup-mirror.sh`) only mirrors
+  the ROUTER's (pfSense) own per-vnet tap interface. A Linux bridge is a
+  real switch -- two other hosts on the same vnet talking directly (or
+  broadcasting) never reach the router's port at all, so the sensor never
+  saw this traffic, full stop, regardless of Zeek's own protocol-analyzer
+  support. Confirmed live 2026-09-27: ran a genuine Responder poisoning
+  round (real poisoned LLMNR/NBT-NS/mDNS answers sent, a real NTLMv2 hash
+  captured), and zero packets on these ports ever reached Zeek's capture
+  NIC even though the identical capture interface saw thousands of
+  ordinary unicast packets/sec from the same subnet. Root-caused and fixed
+  with a new script, `defense-tooling/scripts/proxmox/mirror-vnet-guests.sh`,
+  that mirrors every guest's own tap on the `ad` vnet (not just the
+  router's) to the sensor -- see that script and the Forced Authentication
+  detection's YAML (which hit and fixed the identical root cause) for the
+  full investigation. Re-ran the exact same poisoning test after the fix:
+  the full exchange (broadcast queries, poisoned unicast answers, both
+  IPv4 and IPv6) is now visible in `conn.log`.
+known_false_positives: >-
+  None found in 24h of range background traffic -- every match in that
+  window traces to this session's own live tests (the Responder poisoning
+  round, and earlier `netexec`/`enum4linux-ng` runs that happened to query
+  NBT-NS directly against a specific host as part of their own
+  enumeration, which this detection also correctly flags as unicast
+  NBT-NS activity). **Documented gap, not fixed:** Zeek's DNS analyzer
+  does not decode LLMNR/mDNS packet content on these ports even now that
+  the traffic reaches it (confirmed: no `dns.log` entries at all for this
+  same traffic, despite the backlog's original assumption that Zeek's DNS
+  analyzer would pick these up via dynamic protocol detection regardless
+  of port) -- so the planner's `name` (DNS name responded to) and `ip`
+  (address provided in the poisoned answer) fields aren't obtainable;
+  `host`/`target` (which two hosts were involved) is what's actually
+  available. A single real incident may produce two rows (one per
+  direction of the exchange) rather than being merged into one -- both
+  carry true information, not treated as a bug worth suppressing.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: test box (VMID 350, 10.0.2.10)
+  technique: >-
+    Responder (LLMNR/NBT-NS/mDNS poisoning) against web's own built-in
+    `CyberHawksSync-FileServiceCheck`/`-BackupMountCheck` scheduled tasks
+    as the trigger, after the mirroring fix
+  result: >-
+    Real poisoned answers sent and captured (matches this backlog's
+    already-graduated NTLM Authentication detection's own verification).
+    Zeek's conn.log now shows the full exchange: web's broadcast queries
+    to 224.0.0.252/224.0.0.251/the subnet broadcast address, AND the test
+    box's poisoned unicast answers back to web on all three ports (137,
+    5353, 5355), plus the IPv6 equivalents. Fired correctly.
+embed:
+  title: Name Resolution Poisoning
+  additional_fields:
+    - target
+    - ports
+references:
+  - 'detections/backlog.md, "Reconnaissance & discovery" (backlog row: "Name resolution poisoning (LLMNR / NBT-NS / mDNS)")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

