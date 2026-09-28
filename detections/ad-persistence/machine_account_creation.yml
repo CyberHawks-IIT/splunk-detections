@@ -1,0 +1,62 @@
+name: Machine Account Creation
+id: ad-persistence-machine-account-creation
+version: 1
+date: '2026-09-27'
+status: production
+category: ad-persistence
+description: >-
+  Any computer account created anywhere in the domain. This range's default
+  `ms-DS-MachineAccountQuota` (10) lets any authenticated domain user
+  self-join a machine account -- a common attack primitive (RBCD, Shadow
+  Credentials setup, resource-based delegation abuse) -- but nobody should
+  be doing this post-provisioning, so every occurrence fires with no
+  filtering, per the Alert Embed Planner's own note.
+data_source:
+  - Windows Events -- 4741 (computer account created)
+search: |-
+  index=windows EventCode=4741
+  | bucket _time span=1m
+  | stats values(SAM_Account_Name) as account by _time Subject_Account_Name
+  | rename Subject_Account_Name as user
+  | table user account
+how_to_implement: >-
+  No infra fix needed -- 4741 auditing (Computer Account Management,
+  already covered by the existing "Account Management" audit subcategory)
+  was already on and forwarded. No SACL required, unlike the 5136-based
+  detections. Renamed the generic Account_Name field (multivalue, since
+  both the subject and the new computer object share that label in the raw
+  event) to the unambiguous SAM_Account_Name/Subject_Account_Name pair,
+  confirmed via `| fieldsummary`.
+known_false_positives: >-
+  None expected -- no legitimate machine provisioning happens in this range
+  after initial domain setup, so any 4741 at all is signal. **Documented
+  gap, same as DNS Record Creation:** this event type carries no source IP
+  field at all, so the Attacker-lookup embed field can't be populated from
+  this event alone; `user` (the creating account) is the available
+  attribution.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    impacket-addcomputer -computer-name 'PWNED-TEST$' -computer-pass
+    'Passw0rd123!' -dc-ip 10.0.2.2 'cyberhawks.lab/dsmith:Summer2026'
+    (dsmith is a plain domain user with no special rights -- relies only on
+    the default MachineAccountQuota)
+  result: >-
+    Machine account created successfully, fired exactly once. Cleaned up
+    afterward (Remove-ADComputer as domain admin -- dsmith itself lacked
+    delete rights on the object it created).
+embed:
+  title: Machine Account Creation
+  additional_fields:
+    - user
+    - account
+references:
+  - 'detections/backlog.md, "AD persistence & privilege escalation" (backlog row: "Rogue machine account creation")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false
