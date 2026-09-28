@@ -61,6 +61,8 @@ category table below.
 | Malicious local service creation | 2026-09-27 | [host-persistence/service_creation_local.yml](host-persistence/service_creation_local.yml) | Named "Service Creation (Local)". Same local-creation technique as the scheduled-task version. **Documented gap:** with no correlated 4624 available (that's the whole point of this branch), there's no way to resolve 7045's raw SID to a name at all — shipped without a `user` field rather than exposing a raw SID under that name |
 | Event log clearing | 2026-09-27 | [defense-evasion/event_log_clear.yml](defense-evasion/event_log_clear.yml) | Named "Event Log Clear". No infra fix needed. **Real finding, answering the planner's own question:** Windows itself never clears logs on its own, but this *project's* pre-snapshot maintenance workflow does (18-26 pre-existing clear events per DC in a 24h lookback, all from this session's own snapshot cycles) — deliberately left unexcluded since there's no reliable way to tell that apart from real track-covering by account name alone; documented as expected noise around every snapshot cycle instead. Live `wevtutil cl` on two logs, fired exactly once, correctly merging both into one alert |
 | WMI event subscription persistence | 2026-09-27 | [host-persistence/wmi_event_subscription.yml](host-persistence/wmi_event_subscription.yml) | Named "WMI Event Subscription Creation". No infra fix needed — Sysmon's WmiEvents rule group was already correctly configured to log everything. Live `Set-WmiInstance` creating a filter+consumer+binding, fired exactly once, correctly merging all three creation events into one alert |
+| RPC/ICPR issuance (ESC1-4, 6, 7, 9, 10, 13, 15-17) | 2026-09-27 | [adcs/certificate_request_rpc.yml](adcs/certificate_request_rpc.yml) | Named "Certificate Request (RPC)". No infra fix needed — 4886/4887 already forwarded. Correlated to Zeek `conn.log` on TCP/445 (the SMB transport ICPR RPC actually uses, confirmed live — not the classic RPC endpoint-mapper port 135 DCSync's own correlation avoided for being too noisy). Live `certipy-ad req` exploiting the range's real ESC1 template misconfiguration, fired exactly once. **Not fully cleaned up:** the issued test certificate couldn't be revoked afterward due to an unrelated `RPC_S_SERVER_UNAVAILABLE` error, not chased down this session — flagged for final cleanup |
+| `/etc/shadow` read | 2026-09-27 | [linux/shadow_dump.yml](linux/shadow_dump.yml) | Named "Shadow Dump". No infra fix needed — the auditd rule and `linux_audit` forwarding were already set up. **Real, substantial noise found and filtered:** `unix_chkpwd`/`sshd-session`/`systemd`/`accounts-daemon` all open `/etc/shadow` as part of routine PAM/auth plumbing, some even under a real user's session ID — filtered by both `auid!=unset` and an explicit `comm` exclude-list. Live SSH as the low-priv `user` account + `sudo less /etc/shadow` (GTFOBins escape via the range's real NOPASSWD sudo rule), fired exactly once, correlated via the shared auditd session ID back to the SSH login's real source IP |
 
 ## Zeek logs actually needed
 
@@ -136,10 +138,12 @@ be the row to add then; nothing to alert on for it yet.
 
 ## ADCS
 
+RPC/ICPR issuance graduated 2026-09-27 -- see the "Implemented" section
+above.
+
 | Detection | Log source | Status |
 |---|---|---|
-| RPC/ICPR issuance (ESC1-4, 6, 7, 9, 10, 13, 15-17) | CA operational log (action) + Zeek `conn.log` (IP), excluding normal auto-enrollment where the requesting principal is the machine account of the host the certificate is issued to | ready |
-| HTTP web enrollment (ESC8) | IIS log on the CA | ready |
+| HTTP web enrollment (ESC8) | IIS log on the CA | ready — **not attempted this session, IIS-dependent**: the Web.config.bak detection's own confirmed-blocked IIS forwarding gap (see "Web application" below) means `index=iis` has zero events on this range regardless of host, so this row would hit the same wall — skip until that gap is independently fixed |
 
 ## Credential & ticket dumping
 
@@ -188,6 +192,5 @@ WMI event subscription persistence graduated 2026-09-27 — see the
 
 ## Linux (service-abuse host)
 
-| Detection | Log source | Status |
-|---|---|---|
-| `/etc/shadow` read | auditd — file watch + PAM `USER_LOGIN`, tied by `auid`/`ses` | ready — **note:** ingestion not wired up yet; auditd's plain-text format mostly auto-extracts in Splunk without an add-on, see `defense-tooling`'s open items for what a dedicated add-on would still improve |
+`/etc/shadow` read graduated 2026-09-27 -- see the "Implemented" section
+above. This category is now fully graduated.

@@ -1,0 +1,78 @@
+name: Shadow Dump
+id: linux-shadow-dump
+version: 1
+date: '2026-09-27'
+status: production
+category: linux
+description: >-
+  `/etc/shadow` opened for read by a real interactive login session (not a
+  system service's own routine authentication check) on the `demo` Linux
+  host -- the aftermath of a successful local privilege escalation. Tied
+  back to the originating SSH login via the shared auditd session ID for
+  source-IP attribution.
+data_source:
+  - >-
+    auditd (`linux_audit` sourcetype) -- the `shadow_read` file-watch key
+    (`-w /etc/shadow -p r`) correlated by session ID (`ses`) to a
+    `USER_LOGIN` event for the real source IP
+search: |-
+  index=linux key="shadow_read"
+  | rex field=_raw "ses=(?<ses>\d+)"
+  | rex field=_raw "AUID=\"(?<auid_name>[^\"]+)\""
+  | rex field=_raw "comm=\"(?<comm>[^\"]+)\""
+  | where auid_name!="unset" AND NOT comm IN ("unix_chkpwd","sshd-session","systemd","accounts-daemon","login","(systemd)","sudo")
+  | join type=left ses [
+      search index=linux "USER_LOGIN"
+      | rex field=_raw "ses=(?<ses>\d+)"
+      | rex field=_raw "addr=(?<Source_Network_Address>[0-9.]+)"
+      | stats values(Source_Network_Address) as Source_Network_Address by ses
+    ]
+  | bucket _time span=1m
+  | stats values(comm) as tool values(Source_Network_Address) as Source_Network_Address values(auid_name) as user by _time host ses
+  | table Source_Network_Address host user tool
+how_to_implement: >-
+  No infra fix needed -- the `-w /etc/shadow -p r -k shadow_read` auditd
+  rule and the `linux_audit` sourcetype forwarding (with its `ses`/`AUID`
+  field aliases) were already set up in an earlier defense-tooling session.
+  **Real, substantial noise found and filtered, not assumed away:** the
+  `shadow_read` key fires constantly from routine system activity that has
+  nothing to do with an attacker reading the file's contents --
+  `unix_chkpwd` (PAM's own password-check helper, invoked on every login/
+  sudo attempt), `sshd-session`, `systemd`, and `accounts-daemon` all open
+  `/etc/shadow` as part of normal auth plumbing, most with `auid=unset`
+  (no real login session, i.e. a system service) but some (`unix_chkpwd`)
+  even with a real resolved AUID matching the actual user attempting to
+  authenticate. Filtered on both: `auid_name!="unset"` (excludes system-
+  service-initiated opens) AND an explicit `comm` exclude-list (catches
+  `unix_chkpwd`'s own legitimate per-login AUID). Zero false positives
+  found in a 24h baseline with this combined filter.
+known_false_positives: >-
+  None observed in a 24h lookback with the current exclude-list. If a new
+  legitimate service is ever added to this host that opens `/etc/shadow`
+  under a real user's login session, it would need adding to the `comm`
+  exclude list the same way `unix_chkpwd` was.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11), via SSH as the low-priv `user` account
+  technique: >-
+    SSH as user@10.1.1.1 (password), then `sudo less /etc/shadow`
+    (exploiting the range's own NOPASSWD sudo rule on `less`, a classic
+    GTFOBins escape) -- real shadow content retrieved
+  result: >-
+    Fired exactly once, correctly attributing 192.168.1.11 / demo / user /
+    tool=less, correlated via the shared auditd session ID to the SSH
+    login's own USER_LOGIN event for the source IP.
+embed:
+  title: Shadow Dump
+  additional_fields:
+    - host
+    - user
+references:
+  - 'detections/backlog.md, "Linux (service-abuse host)" (backlog row: "/etc/shadow read")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

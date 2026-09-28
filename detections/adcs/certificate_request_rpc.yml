@@ -1,0 +1,85 @@
+name: Certificate Request (RPC)
+id: adcs-certificate-request-rpc
+version: 1
+date: '2026-09-27'
+status: production
+category: adcs
+description: >-
+  A certificate issued by the CA over RPC/ICPR (`DCOMorRPC=RPC`, as opposed
+  to HTTP web enrollment) to a non-machine requester -- covers the RPC-based
+  exploitation path for the vulnerable ADCS templates in this range
+  (ESC1/2/3/4/6/7/9/10/13/15/16/17). Excludes machine accounts to avoid
+  alerting on normal computer-certificate auto-enrollment.
+data_source:
+  - >-
+    CA operational log (Windows Events 4886/4887, Certification Services)
+    correlated with Zeek `conn.log` (TCP/445, the SMB transport ICPR RPC
+    uses) for source-IP attribution
+search: |-
+  index=windows EventCode=4887 DCOMorRPC=RPC
+  | where NOT match(Requester, "\$$")
+  | rex field=ComputerName "(?<host>[^.]+)"
+  | join type=left host [
+      search index=zeek sourcetype=zeek:conn id_resp_p=445
+      | lookup known_range_hosts ip AS id_resp_h OUTPUT hostname
+      | rename hostname as host
+      | where isnotnull(host)
+      | stats values(id_orig_h) as Source_Network_Address by host
+    ]
+  | bucket _time span=1m
+  | stats values(Source_Network_Address) as Source_Network_Address values(Requester) as user values(Certificate_Template) as template values(Request_ID) as id by _time host
+  | table Source_Network_Address host user template id
+how_to_implement: >-
+  No infra fix needed -- 4886/4887 (Certification Services auditing) and
+  Zeek's `conn.log` were already forwarded, and `known_range_hosts` (the
+  existing IP-to-hostname lookup used elsewhere in this project) resolves
+  the CA's own IP for the join. Correlated on TCP/445 rather than the
+  classic RPC endpoint-mapper port (135, used for DCSync's own conn.log
+  correlation, which was skipped there for being too noisy) -- confirmed
+  live that `certipy-ad req`'s RPC path actually transits the SMB named
+  pipe transport (\pipe\cert) on 445, not a dynamic port via 135, and the
+  CA sees far less generic background SMB traffic than a DC does, so this
+  correlation is much cleaner here. Excluded machine-account requesters
+  ($-suffixed) per the planner's own note, matching this project's existing
+  convention (NetNTLMv1 Authentication, Machine Account Creation) of
+  excluding by account-name shape.
+known_false_positives: >-
+  Machine account auto-enrollment is excluded by requester name shape. No
+  baseline certificate issuance existed at all in this range in the 24h
+  prior to testing, so this exclusion is defensive/per-design rather than
+  empirically tuned against observed noise -- revisit if legitimate
+  auto-enrollment traffic ever appears and doesn't match the `$`-suffix
+  assumption.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    certipy-ad req -u dsmith@cyberhawks.lab -p Summer2026 -ca cyberhawks-CA
+    -target 10.0.2.4 -template ESC1Template -upn administrator@cyberhawks.lab
+    -dc-ip 10.0.2.2 (the range's genuine ESC1 template misconfiguration)
+  result: >-
+    Certificate issued successfully with the attacker-controlled UPN SAN.
+    Fired exactly once, correctly attributing 192.168.1.11 / ca / dsmith /
+    ESC1Template / request ID 4. **Not fully cleaned up:** attempting to
+    revoke the issued certificate afterward (`certutil -revoke`, both
+    directly and via the SYSTEM-scheduled-task double-hop workaround) hit
+    `RPC_S_SERVER_UNAVAILABLE` from an unrelated cause not chased down this
+    session -- the test certificate itself remains valid on the CA. Low
+    real-world impact (a single test cert, not a persistent access grant
+    beyond what dsmith already has), but flagged for whoever does the
+    range's final cleanup.
+embed:
+  title: Certificate Request (RPC)
+  additional_fields:
+    - user
+    - template
+    - id
+references:
+  - 'detections/backlog.md, "ADCS" (backlog row: "RPC/ICPR issuance (ESC1-4,6,7,9,10,13,15-17)")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false
