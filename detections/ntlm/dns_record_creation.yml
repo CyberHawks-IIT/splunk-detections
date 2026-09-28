@@ -1,0 +1,80 @@
+name: DNS Record Creation
+id: ntlm-dns-record-creation
+version: 1
+date: '2026-09-27'
+status: production
+category: ntlm
+description: >-
+  A new DNS record (dnsNode object) created under the cyberhawks.lab
+  AD-integrated zone -- the technique behind attacker-added records used
+  to stand up a fake service, redirect a hostname, or point a coercion
+  target somewhere useful. Real range hosts' DNS records were all
+  provisioned once at build time, so any new record creation from here on
+  is the signal.
+data_source:
+  - >-
+    Windows Events -- 5137, directory service object created, Class =
+    dnsNode, under DC=DomainDnsZones
+search: |-
+  index=windows EventCode=5137 Class=dnsNode
+  | rex field=DN "^DC=(?<name>[^,]+)"
+  | rename Account_Name as user
+  | table user name
+how_to_implement: >-
+  Required a real infra fix, bigger than the credential-exposure category's
+  one: "Directory Service Changes" auditing being on is NOT enough by
+  itself for 5136/5137 to fire at all -- confirmed live 2026-09-27 that
+  literally zero 5136/5137 events existed anywhere in the domain despite
+  the subcategory already being enabled, because there was no object SACL
+  anywhere (the Default Domain Policy GPO's own SACL, already present for
+  the ACL/DACL Modification detection, is what makes 5136 fire for *that*
+  object specifically -- it doesn't cascade domain-wide). Added a new SACL
+  scoped to the DNS zone partition object itself
+  (`DC=cyberhawks.lab,CN=MicrosoftDNS,DC=DomainDnsZones,...`) with
+  ContainerInherit so every child record creation gets audited --
+  cyber-range's `detection_logging` role (`configure_sacls_dc.ps1`),
+  applied live to dc1 this session (replicates to dc2 automatically, it's
+  part of the object's own security descriptor). This SAME missing-SACL
+  root cause likely blocks several other 5136/5137-dependent detections
+  still in the backlog (RBCD Configuration, Shadow Credential Creation,
+  ScriptPath Attribute Tampering) -- each will need its own scoped SACL on
+  its own target object the same way, not assumed to already work.
+known_false_positives: >-
+  None found -- zero dnsNode creation events in 24h of range background
+  traffic before this session's live test (though most of that window
+  predates the SACL fix, so this baseline is short). This range's DNS
+  records were all provisioned once at build time with no ongoing dynamic
+  registration expected. **Real, documented limitation, not a gap in this
+  search:** the Alert Embed Planner asks for an `ip` field (the address
+  the new record points to), but Windows logs the DNS record's actual
+  value as opaque `<Binary>` in the accompanying 5136 attribute-value
+  event -- there is no way to recover the IP from Windows auditing alone.
+  Also, 5137 carries no network/source-IP information at all (it's a
+  directory-service event, not a network one), so this detection has no
+  source IP to key an "Attacker" lookup off of -- `user` is the only
+  attribution field available.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611)
+  technique: >-
+    krbrelayx's dnstool.py, authenticated as the starter `user` account
+    (CYBERHAWKS\user / password), against dc1 (10.0.2.2): `-a add -r
+    evilhost2 -d 10.0.2.98`
+  result: >-
+    LDAP operation completed successfully; a real dnsNode object was
+    created and (after the SACL fix) correctly produced a 5137 event.
+    Fired exactly once.
+embed:
+  title: DNS Record Creation
+  additional_fields:
+    - user
+    - name
+references:
+  - 'detections/backlog.md, "NTLM relay & coercion" (backlog row: "Attacker-added DNS record")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false
