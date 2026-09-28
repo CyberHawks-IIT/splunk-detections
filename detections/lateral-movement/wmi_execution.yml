@@ -1,0 +1,80 @@
+name: 'Lateral Movement: WMI'
+id: lateral-movement-wmi
+version: 1
+date: '2026-09-27'
+status: production
+category: lateral-movement
+description: >-
+  A process spawned as a child of `WmiPrvSE.exe` -- the signature of
+  remote command execution over WMI (`wmiexec.py`, `Invoke-WmiMethod`,
+  `Invoke-CimMethod` against `Win32_Process.Create`). Correlated with the
+  preceding remote logon on the same host to attribute the real source IP,
+  since WMI's own process-creation event carries no network information.
+data_source:
+  - >-
+    Sysmon Event 1 (ProcessCreate, `ParentImage` = `WmiPrvSE.exe`) + Windows
+    Events 4624 (Logon Type 3) on the same target for source-IP attribution
+search: |-
+  index=windows sourcetype=XmlWinEventLog EventID=1 ParentImage="*WmiPrvSE.exe"
+  | rename host as target
+  | join type=left target [
+      search index=windows EventCode=4624 Logon_Type=3 Source_Network_Address!="-" Source_Network_Address!="10.0.2.1"
+      | rex field=ComputerName "(?<target>[^.]+)"
+      | stats values(Source_Network_Address) as Source_Network_Address by target
+    ]
+  | bucket _time span=1m
+  | stats values(User) as user by _time Source_Network_Address target
+  | table Source_Network_Address target user
+how_to_implement: >-
+  No infra fix needed -- Sysmon's process-creation logging and the
+  channel's forwarding were already in place. **Real field-naming gotcha
+  hit and worked through, not an infra gap:** this project's Sysmon
+  channel is XML-rendered (`renderXml = 1`), and defense-tooling's own
+  CLAUDE.md already documents that Splunk's Windows TA truncates the
+  *sourcetype* it's given down to the bare `WinEventLog`/`XmlWinEventLog`
+  at index time -- what wasn't previously hit in this project is that XML
+  events ALSO extract host identity into the generic Splunk `host` field
+  (short name, e.g. `SQL1`) rather than the classic-event `ComputerName`
+  field (FQDN) that every other detection in this repo filters on; querying
+  `ComputerName=` or `LogName=` against a Sysmon/XML event silently matches
+  nothing. Confirmed this cost real debugging time this session (looked
+  like a forwarding regression on sql1 until traced to the query itself)
+  -- worth remembering for any future Sysmon-based detection. Also
+  filtered the 4624 correlation to `Source_Network_Address!="-"`, since
+  WMI/DCOM's own internal re-authentication calls for each method
+  invocation generate additional 4624s with no network address that would
+  otherwise win a bare `latest()`. Also excludes this control host's own
+  admin IP (10.0.2.1) from the correlation, same as NTLM Authentication/
+  WinRM logon -- discovered while designing the paired local/remote
+  scheduled-task and service detections that a bare "any Type 3 logon in
+  the same minute" correlation is too broad once this control host's own
+  constant WinRM administration is in the picture.
+known_false_positives: >-
+  None observed in a 24h lookback. No legitimate WMI-based remote
+  administration tooling runs against this range day to day.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    impacket-wmiexec cyberhawks.lab/Administrator:<password>@10.0.2.6 (sql1)
+    running `whoami` -- the identical technique against workstation (10.0.2.8)
+    hung indefinitely and was abandoned rather than investigated further,
+    likely a firewall/DCOM difference between the client and server builds
+  result: >-
+    Fired exactly once per command executed (each `cmd.exe /Q /c ...`
+    wrapper Sysmon logs individually, correctly bucketed into one alert),
+    accurately attributing 192.168.1.11 / SQL1 / Administrator.
+embed:
+  title: 'Lateral Movement: WMI'
+  additional_fields:
+    - target
+    - user
+references:
+  - 'detections/backlog.md, "Lateral movement" (backlog row: "WMI remote execution")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

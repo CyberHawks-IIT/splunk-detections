@@ -1,0 +1,75 @@
+name: Scheduled Task Creation (Local)
+id: host-persistence-scheduled-task-local
+version: 1
+date: '2026-09-27'
+status: production
+category: host-persistence
+description: >-
+  A scheduled task created on a host with NO correlated fresh remote (Type
+  3) network logon in the same window -- the signature of local
+  persistence set up by an attacker already on the box (a dropped payload,
+  an already-running implant), as opposed to Lateral Movement: Scheduled
+  Task's remote-execution case. The absence of a correlated logon is
+  exactly what distinguishes the two.
+data_source:
+  - >-
+    Windows Events -- 4698 (scheduled task created) with no correlated 4624
+    (Logon Type 3) on the same host in the same window
+search: |-
+  index=windows EventCode=4698
+  | rex field=ComputerName "(?<target>[^.]+)"
+  | join type=left target [
+      search index=windows EventCode=4624 Logon_Type=3 Source_Network_Address!="-" Source_Network_Address!="10.0.2.1"
+      | rex field=ComputerName "(?<target>[^.]+)"
+      | stats values(Source_Network_Address) as Source_Network_Address by target
+    ]
+  | where isnull(Source_Network_Address)
+  | bucket _time span=1m
+  | stats values(Task_Name) as task values(Subject_Account_Name) as user by _time target
+  | table target user task
+how_to_implement: >-
+  No infra fix needed -- shares its data source with Lateral Movement:
+  Scheduled Task, just the inverted `isnull()` branch of the same join.
+  **Real testing challenge solved, worth documenting:** genuinely
+  simulating "local, no remote logon at all" from a control host that only
+  has WinRM access is harder than it sounds -- a plain
+  `Invoke-Command`-created task always has ITS OWN WinRM logon essentially
+  simultaneous with the task creation, which would incorrectly look
+  "remote" even though 10.0.2.1 is excluded (the point being to prove the
+  *correlation logic itself* works, not just to lean on the exclusion).
+  Solved by using the SYSTEM-scheduled-task double-hop pattern already
+  established in this session's memory (an outer WinRM-created task that
+  triggers an *inner* task, which runs moments later via the Task
+  Scheduler engine's own Batch-type execution context -- not a fresh
+  Network logon at all) to get a genuinely representative local-creation
+  event.
+known_false_positives: >-
+  None expected -- no legitimate local task-scheduling workflow exists in
+  this range outside of range provisioning itself (which predates any
+  detection's live window).
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: workstation itself, via a locally-triggered SYSTEM task (see how_to_implement)
+  technique: >-
+    An outer WinRM-created task ("TriggerLocalPersist") whose own action
+    creates a second task ("LocalPersistTest2") when it fires -- the inner
+    creation has no correlated Type 3 logon from any non-excluded IP
+  result: >-
+    Fired exactly once for the inner task, correctly showing no
+    Source_Network_Address match. Confirmed the corresponding *remote*
+    detection does NOT fire for this same event (verified together as a
+    pair). All test tasks deleted afterward.
+embed:
+  title: Scheduled Task Creation (Local)
+  additional_fields:
+    - target
+    - task
+references:
+  - 'detections/backlog.md, "Host persistence" (backlog row: "Local scheduled task persistence")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

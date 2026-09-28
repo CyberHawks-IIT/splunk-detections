@@ -1,0 +1,67 @@
+name: Service Creation (Local)
+id: host-persistence-service-creation-local
+version: 1
+date: '2026-09-27'
+status: production
+category: host-persistence
+description: >-
+  A service installed on a host with NO correlated fresh remote (Type 3)
+  network logon in the same window -- local persistence set up by an
+  attacker already on the box, as opposed to Lateral Movement: Service's
+  remote-execution (PsExec-style) case. Same distinguishing logic as
+  Scheduled Task Creation (Local).
+data_source:
+  - >-
+    Windows Events -- 7045 (service installed) with no correlated 4624
+    (Logon Type 3) on the same host in the same window
+search: |-
+  index=windows EventCode=7045
+  | rex field=ComputerName "(?<target>[^.]+)"
+  | join type=left target [
+      search index=windows EventCode=4624 Logon_Type=3 Source_Network_Address!="-" Source_Network_Address!="10.0.2.1"
+      | rex field=ComputerName "(?<target>[^.]+)"
+      | stats values(Source_Network_Address) as Source_Network_Address by target
+    ]
+  | where isnull(Source_Network_Address)
+  | bucket _time span=1m
+  | stats values(Service_Name) as service by _time target
+  | table target service
+how_to_implement: >-
+  No infra fix needed -- shares its data source with Lateral Movement:
+  Service, the inverted branch of the same join. **Documented gap, same as
+  the remote variant:** 7045 has no resolved account name (only a raw SID),
+  and unlike the remote case there's no correlated 4624 available here to
+  borrow a resolved name from (that's the whole point of this branch --
+  there IS no correlated logon) -- so `user` isn't included in this
+  detection's output at all, only `target`/`service`. A SID-to-name lookup
+  would need either an LDAP-backed lookup table (not built in this
+  project) or accepting the raw SID as-is; left out entirely rather than
+  shipping a raw SID under a field named "user".
+known_false_positives: >-
+  None expected -- no legitimate local service-installation workflow
+  exists in this range outside initial provisioning.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: workstation itself, via a locally-triggered SYSTEM task (same double-hop pattern as Scheduled Task Creation (Local))
+  technique: >-
+    The same outer/inner SYSTEM-task trigger used for the scheduled-task
+    local test, whose inner action creates a service ("LocalSvcTest2") via
+    `sc.exe create` instead of a scheduled task
+  result: >-
+    Fired exactly once, correctly showing no Source_Network_Address match.
+    Confirmed the corresponding remote detection does NOT fire for this
+    same event. Service deleted afterward.
+embed:
+  title: Service Creation (Local)
+  additional_fields:
+    - target
+    - service
+references:
+  - 'detections/backlog.md, "Host persistence" (backlog row: "Malicious local service creation")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

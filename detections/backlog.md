@@ -54,6 +54,11 @@ category table below.
 | ScriptPath attribute tampering | 2026-09-27 | [ad-persistence/scriptpath_attribute_tampering.yml](ad-persistence/scriptpath_attribute_tampering.yml) | Named "ScriptPath Attribute Tampering". Required a real infra fix: no object SACL covered `scriptPath` anywhere, added one domain-wide scoped to user-class descendants (not tied to one pre-designed target, unlike RBCD/Shadow Creds), applied live to dc1 and added to `configure_sacls_dc.ps1`. Live `ldap3` modify of ssmith's scriptPath as "user", fired exactly once with the real value visible in plaintext |
 | SAM — remote via SAMR | 2026-09-27 | [credential-dumping/sam_dump_remote.yml](credential-dumping/sam_dump_remote.yml) | Named "SAM Dump (Remote)". No infra fix needed. **Real finding:** impacket's authenticated RPC calls (secretsdump/samrdump/lookupsid with real creds) negotiate RPC-level packet privacy, making them invisible to Zeek's dce_rpc analyzer even though the SMB session itself is plaintext — confirmed by testing the identical technique with `rpcclient` (Samba), which decodes fine. Keys on `SamrOpenUser`+`SamrQueryInformationUser2` (the actual per-account dump pattern) rather than the bare `SamrEnumerateUsersInDomain` listing already covered by SMB Anonymous Object Enumeration, avoiding overlap |
 | LSA — remote via LSARPC | 2026-09-27 | [credential-dumping/lsa_dump_remote.yml](credential-dumping/lsa_dump_remote.yml) | Named "LSA Dump (Remote)". Same RPC-sealing finding as SAM Dump (Remote) above. Keys on `LsarLookupSids`, which SMB Anonymous Object Enumeration's own testing already proved returns `STATUS_ACCESS_DENIED` anonymously in this range — so this operation can only ever be authenticated, with zero overlap with that detection's anonymous-only scope |
+| WMI remote execution | 2026-09-27 | [lateral-movement/wmi_execution.yml](lateral-movement/wmi_execution.yml) | Named "Lateral Movement: WMI". No infra fix needed. **Real gotcha found and worked through:** this project's XML-rendered Sysmon events extract host identity into Splunk's generic `host` field, not the classic-event `ComputerName` field every other detection filters on — cost real debugging time before being traced to the query itself, not a forwarding regression. Live `impacket-wmiexec` against sql1 (workstation hung indefinitely with the same technique, abandoned rather than chased), fired exactly once per command, correlated to the preceding remote logon for source-IP attribution |
+| Remote scheduled task creation | 2026-09-27 | [lateral-movement/scheduled_task.yml](lateral-movement/scheduled_task.yml) | Named "Lateral Movement: Scheduled Task". **Real design finding:** a bare "any Type 3 logon on the target in the same minute" correlation is too broad once this control host's own constant WinRM administration is in the picture — added the same 10.0.2.1 exclusion already used by NTLM Authentication/WinRM logon. Live `impacket-atexec` against sql1, fired exactly once |
+| Remote service creation (including PsExec) | 2026-09-27 | [lateral-movement/service_creation.yml](lateral-movement/service_creation.yml) | Named "Lateral Movement: Service". Same control-host exclusion as the scheduled-task version. **Documented gap:** 7045 never resolves an account name (only a raw SID) — borrowed the resolved name from the correlated 4624 instead. Live `impacket-psexec` against sql1 (service "rubo", ran as SYSTEM), fired exactly once |
+| Local scheduled task persistence | 2026-09-27 | [host-persistence/scheduled_task_local.yml](host-persistence/scheduled_task_local.yml) | Named "Scheduled Task Creation (Local)". Shares its data source with the remote variant (inverted branch of the same join). **Real testing challenge solved:** a plain WinRM-created task always has its own near-simultaneous logon, which would look "remote" even with the exclusion in place — used the SYSTEM-scheduled-task double-hop pattern (an outer task whose action creates a second, inner task via the Task Scheduler engine's own Batch-context execution) to get a genuinely local-creation event, verified paired against the remote detection to confirm neither cross-fires |
+| Malicious local service creation | 2026-09-27 | [host-persistence/service_creation_local.yml](host-persistence/service_creation_local.yml) | Named "Service Creation (Local)". Same local-creation technique as the scheduled-task version. **Documented gap:** with no correlated 4624 available (that's the whole point of this branch), there's no way to resolve 7045's raw SID to a name at all — shipped without a `user` field rather than exposing a raw SID under that name |
 
 ## Zeek logs actually needed
 
@@ -154,11 +159,8 @@ plain LDAP and LDAPS -- left as a known gap, see the YAML's
 
 ## Lateral movement
 
-| Detection | Log source | Status |
-|---|---|---|
-| WMI remote execution | WMI-Activity operational log + Sysmon Event 1 (child process of `WmiPrvSE.exe`) | ready |
-| Remote scheduled task creation | Windows Events — 4698 (scheduled task created) correlated with a 4624 Logon Type 3 on the target in the preceding window — that correlation is what distinguishes this from the local-persistence variant below | ready |
-| Remote service creation (including PsExec) | Windows Events — 7045 (service installed) + 4697 on the target, correlated with a preceding remote logon (4624 Logon Type 3, or Type 10 for PsExec-style remote admin sessions) — that correlation is what distinguishes this from the local-persistence variant below | ready |
+All three detections in this category graduated 2026-09-27 — see the
+"Implemented" section above.
 
 ## AD persistence & privilege escalation
 
@@ -176,10 +178,11 @@ tampering, and scriptPath tampering all graduated 2026-09-27 too -- see the
 
 ## Host persistence
 
+Local scheduled task persistence and malicious local service creation
+graduated 2026-09-27 — see the "Implemented" section above.
+
 | Detection | Log source | Status |
 |---|---|---|
-| Local scheduled task persistence | Windows Events — 4698 (scheduled task created) with no correlated remote logon (4624 Logon Type 3) in the preceding window — see Lateral movement above for the distinguishing correlation | ready |
-| Malicious local service creation | Windows Events — 7045 (service installed) + 4697, with no correlated remote logon — see Lateral movement above for the distinguishing correlation | ready |
 | WMI event subscription persistence | Sysmon — Events 19/20/21 (WmiEvent: filter/consumer/binding created) — requires the WMI event tracing subscriptions to be turned on in the Sysmon config | ready |
 
 ## Linux (service-abuse host)

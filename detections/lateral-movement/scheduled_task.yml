@@ -1,0 +1,74 @@
+name: 'Lateral Movement: Scheduled Task'
+id: lateral-movement-scheduled-task
+version: 1
+date: '2026-09-27'
+status: production
+category: lateral-movement
+description: >-
+  A scheduled task created on a host that also saw a fresh remote (Type 3)
+  network logon in the same window -- the signature of remote task-based
+  execution (`impacket-atexec`, `schtasks /create /s <target>`). The
+  correlation with a preceding remote logon is what distinguishes this from
+  Scheduled Task Creation (Local), the host-persistence variant of the same
+  underlying event.
+data_source:
+  - >-
+    Windows Events -- 4698 (scheduled task created) correlated with 4624
+    (Logon Type 3) on the same host in the same window
+search: |-
+  index=windows EventCode=4698
+  | rex field=ComputerName "(?<target>[^.]+)"
+  | join type=left target [
+      search index=windows EventCode=4624 Logon_Type=3 Source_Network_Address!="-" Source_Network_Address!="10.0.2.1"
+      | rex field=ComputerName "(?<target>[^.]+)"
+      | eval user=mvfilter(Account_Name!="-")
+      | stats values(Source_Network_Address) as Source_Network_Address values(user) as user by target
+    ]
+  | where isnotnull(Source_Network_Address)
+  | bucket _time span=1m
+  | stats values(Task_Name) as task values(user) as user by _time Source_Network_Address target
+  | table Source_Network_Address target user task
+how_to_implement: >-
+  No infra fix needed -- 4698/4624 were already forwarded and used by
+  other detections. **Real design finding from live testing:** a naive
+  "any Type 3 logon on the target in the same minute" correlation is too
+  broad in an environment where an admin control host is constantly
+  connecting via WinRM -- confirmed live that this control host's own
+  WinRM traffic (10.0.2.1) generates a fresh 4624 essentially simultaneous
+  with any command it runs, which would make even a genuinely *local*
+  (SYSTEM-triggered) task look "remote" by pure timing coincidence. Excluded
+  10.0.2.1 from the correlation, same as the NTLM Authentication/WinRM
+  logon detections' own established exclusion -- verified this doesn't
+  just mask the problem by testing both directions explicitly (see
+  verification below).
+known_false_positives: >-
+  This control host's own admin traffic is excluded by IP. No other
+  legitimate remote task-scheduling tooling runs against this range.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    impacket-atexec cyberhawks.lab/Administrator:<password>@10.0.2.6 whoami
+    (creates, runs, and deletes a task named for a random string)
+  result: >-
+    Fired exactly once, correctly attributing 192.168.1.11 / SQL1 /
+    Administrator / the task name. Separately confirmed the *local* variant
+    (SYSTEM-triggered task creation on workstation with no remote logon
+    involved, other than this control host's own excluded IP) correctly
+    produces NO match here -- see Scheduled Task Creation (Local)'s own
+    verification for that test.
+embed:
+  title: 'Lateral Movement: Scheduled Task'
+  additional_fields:
+    - target
+    - user
+    - task
+references:
+  - 'detections/backlog.md, "Lateral movement" (backlog row: "Remote scheduled task creation")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false
