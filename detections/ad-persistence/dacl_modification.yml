@@ -1,0 +1,77 @@
+name: DACL Modification
+id: ad-persistence-dacl-modification
+version: 1
+date: '2026-09-27'
+status: production
+category: ad-persistence
+description: >-
+  An AD object's `nTSecurityDescriptor` (its DACL) replaced -- ACL/
+  delegation abuse, granting a principal new rights (GenericAll,
+  GenericWrite, WriteDacl, etc.) on a target object. No ongoing AD
+  administration happens in this range after initial provisioning, so any
+  occurrence at all is signal; per the backlog's own design, this fires on
+  every occurrence rather than filtering to specific rights/GUIDs.
+data_source:
+  - >-
+    Windows Events -- 5136 (directory service object modified,
+    `nTSecurityDescriptor`)
+search: |-
+  index=windows EventCode=5136 "nTSecurityDescriptor" "Type:\tValue Added"
+  | rex field=_raw "Subject:\r?\n\tSecurity ID:\t*\S+\r?\n\tAccount Name:\t*(?<user>\S+)"
+  | rex field=_raw "Value:\t(?<descriptor>O:.+?)\r?\n"
+  | bucket _time span=1m
+  | stats values(descriptor) as descriptor by _time user DN
+  | rename DN as target
+  | table user target descriptor
+how_to_implement: >-
+  No new infra fix needed -- the only object SACL in this range covering
+  `nTSecurityDescriptor` writes (GenericAll, Success+Failure) is on the
+  Default Domain Policy GPO specifically, added in an earlier session for
+  this exact detection. Confirmed live that a DACL write on a different
+  object with no SACL of its own (jsmith, testing "user"'s WriteDacl grant)
+  produces nothing, while the SAME kind of write against the GPO fires
+  correctly -- matches this project's now-established pattern (DNS Record
+  Creation, RBCD, Shadow Credentials) that "Directory Service Changes"
+  auditing alone is never sufficient without a real object SACL. **Design
+  deviation, not a gap:** a full DACL replace always produces a paired
+  "Value Deleted" (old descriptor) + "Value Added" (new descriptor) event
+  with the same Correlation ID -- filtered to `Value Added` only to avoid
+  double-reporting the same change. **Deliberately not attempted:**
+  decoding the raw SDDL descriptor into the planner's requested
+  `type`(add/remove)/`account`/`rights` breakdown would need a real
+  set-difference between the old and new ACE lists plus SID-to-name
+  resolution, neither of which has a reliable SPL-native implementation
+  without a much larger custom parsing effort (and no existing SID lookup
+  table in this project, unlike `known_range_hosts` for IPs) -- shipping a
+  fragile, maybe-wrong parse would be worse than giving a human the full
+  descriptor text directly, per this project's own rule against
+  "helpfully" filling gaps with plausible-but-unverified content.
+known_false_positives: >-
+  None expected -- no legitimate ACL administration happens in this range
+  post-provisioning.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: WinRM from the control host, as domain admin (simulating an attacker who already has WriteDacl-equivalent access to the GPO, matching "user"'s real designed grant)
+  technique: >-
+    Get-Acl/Set-Acl against the Default Domain Policy GPO's AD: PSDrive
+    path, adding a GenericAll AccessRule for skumar
+  result: >-
+    Fired exactly once (the paired Value Added event only), correctly
+    reporting user=Administrator, target=the GPO's DN, and the full new
+    descriptor text. skumar's grant removed afterward to restore the
+    original DACL; a similar direct-object test against jsmith (no SACL)
+    correctly produced no event, confirming the object-SACL dependency.
+embed:
+  title: DACL Modification
+  additional_fields:
+    - target
+    - descriptor
+references:
+  - 'detections/backlog.md, "AD persistence & privilege escalation" (backlog row: "ACL / delegation abuse")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

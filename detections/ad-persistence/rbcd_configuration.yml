@@ -1,0 +1,74 @@
+name: RBCD Configuration
+id: ad-persistence-rbcd-configuration
+version: 1
+date: '2026-09-27'
+status: production
+category: ad-persistence
+description: >-
+  A computer object's `msDS-AllowedToActOnBehalfOfOtherIdentity` attribute
+  written -- Resource-Based Constrained Delegation configuration, which
+  grants whichever principal is named in the new security descriptor the
+  ability to impersonate any user against the target computer's services
+  (S4U2Proxy). Not tied to legitimate delegation maintenance in this range
+  (none happens after provisioning), so any write is signal.
+data_source:
+  - >-
+    Windows Events -- 5136 (directory service object modified,
+    `msDS-AllowedToActOnBehalfOfOtherIdentity`)
+search: |-
+  index=windows EventCode=5136 "msDS-AllowedToActOnBehalfOfOtherIdentity"
+  | rex field=_raw "Subject:\r?\n\tSecurity ID:\t*\S+\r?\n\tAccount Name:\t*(?<user>\S+)"
+  | bucket _time span=1m
+  | stats count by _time user DN
+  | rename DN as target
+  | table user target
+how_to_implement: >-
+  Required a real infra fix, matching the DNS Record Creation precedent:
+  no object SACL existed on computer2 (the range's own designed RBCD-write
+  target -- "user" already holds a WriteProperty grant on this exact
+  attribute per cyber-range's VULNERABLE_RANGE_PLAN.md), so 5136 never
+  fired despite domain-wide "Directory Service Changes" auditing being on.
+  Added an object-scoped ActiveDirectoryAuditRule for WriteProperty on the
+  `msDS-AllowedToActOnBehalfOfOtherIdentity` attribute directly on
+  computer2, applied live to dc1 and added to cyber-range's
+  `configure_sacls_dc.ps1`. Used the same `_raw`-based `rex` extraction for
+  `user` as the other 5136-based detections this session (Splunk's
+  automatic Subject_Account_Name extraction is unreliable across the
+  various 5136 attribute types tested).
+known_false_positives: >-
+  None expected -- no legitimate RBCD configuration happens in this range
+  post-provisioning. **Documented gap:** the planner asked for a `trustee`
+  field (which principal was granted the ability to delegate) in addition
+  to `user`/`target`, but the raw 5136 event's `Value` field for this
+  attribute renders as literal "Malformed Security Descriptor" text --
+  Windows' own event-log message formatter doesn't decode the binary
+  security-descriptor blob into a readable SID/account name, and Splunk has
+  no way to recover what Windows itself doesn't render. `user` (who made
+  the change) and `target` (the computer object modified) are the available
+  fields; decoding `trustee` would need a raw LDAP read of the current
+  attribute value at alert time, which is out of scope for a single Splunk
+  search over log data.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    impacket-rbcd -action write -delegate-to computer2$ -delegate-from
+    computer4$ -dc-ip 10.0.2.2 'cyberhawks.lab/user:password'
+  result: >-
+    Fired exactly once, correctly reporting user=user,
+    target=CN=computer2,CN=Computers,DC=cyberhawks,DC=lab. Delegation
+    removed afterward (impacket-rbcd -action remove) to restore the
+    original empty attribute state.
+embed:
+  title: RBCD Configuration
+  additional_fields:
+    - target
+references:
+  - 'detections/backlog.md, "AD persistence & privilege escalation" (backlog row: "RBCD configuration write")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

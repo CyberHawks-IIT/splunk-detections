@@ -1,0 +1,62 @@
+name: Logon Script Tampering
+id: ad-persistence-logon-script-tampering
+version: 1
+date: '2026-09-27'
+status: production
+category: ad-persistence
+description: >-
+  A write to a file inside a DC's NETLOGON scripts folder
+  (`%SystemRoot%\SYSVOL\domain\scripts`) -- the classic logon-script
+  backdoor technique, planting or modifying a script that every logon
+  targeting it will execute. Distinct from ScriptPath Attribute Tampering
+  (which points a user's `scriptPath` attribute at a new/different file
+  rather than modifying the file's contents).
+data_source:
+  - >-
+    Windows Events -- 4663 (SACL, WriteData access to a file under
+    SYSVOL\domain\scripts)
+search: |-
+  index=windows EventCode=4663 Object_Name="*\\scripts\\*" Accesses="WriteData*"
+  | bucket _time span=1m
+  | stats values(Object_Name) as script by _time ComputerName Subject_Account_Name
+  | rename ComputerName as host, Subject_Account_Name as user
+  | table host user script
+how_to_implement: >-
+  No infra fix needed this time -- the object SACL on
+  `SYSVOL\domain\scripts` (Everyone, FullControl, Success+Failure,
+  ContainerInherit+ObjectInherit) was already live on dc1 from an earlier
+  session's `configure_sacls_dc.ps1` run (confirmed present via `Get-Acl
+  -Audit` before any changes this session), and "Object Access" auditing
+  for the File System subcategory was already on. Zero baseline WriteData
+  events on this path in the prior 24h.
+known_false_positives: >-
+  None observed in a 24h lookback. Legitimate script deployment (a real
+  admin updating a logon script) would also trigger this -- acceptable
+  since this range has no ongoing script maintenance workflow to
+  distinguish from an attack.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    smbclient //10.0.2.2/NETLOGON -U CYBERHAWKS/Administrator%<password> -c
+    "put evil.ps1 MapDrives.ps1.bak" (a plain domain user, dsmith, was
+    tried first and correctly denied write access by the share's own
+    permissions -- NETLOGON write requires elevated rights, so this
+    simulates an attacker who has already achieved Domain Admin)
+  result: >-
+    Fired exactly once with the real file path and WriteData access mask.
+    Test file deleted from the share afterward.
+embed:
+  title: Logon Script Tampering
+  additional_fields:
+    - host
+    - script
+references:
+  - 'detections/backlog.md, "AD persistence & privilege escalation" (backlog row: "Logon script tampering")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

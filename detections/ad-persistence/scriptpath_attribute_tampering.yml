@@ -1,0 +1,68 @@
+name: ScriptPath Attribute Tampering
+id: ad-persistence-scriptpath-attribute-tampering
+version: 1
+date: '2026-09-27'
+status: production
+category: ad-persistence
+description: >-
+  A user object's `scriptPath` attribute (which logon script to run at
+  interactive logon) modified. Unlike Logon Script Tampering (which
+  modifies a script file's contents), this points the user at an entirely
+  different -- typically attacker-controlled -- script path. Not tied to
+  one pre-designed target in this range, since any user's `scriptPath`
+  could be tampered with; the object SACL below is scoped domain-wide to
+  every user-class object rather than a single account.
+data_source:
+  - Windows Events -- 5136 (directory service object modified, `scriptPath`)
+search: |-
+  index=windows EventCode=5136 "LDAP Display Name:\tscriptPath"
+  | rex field=_raw "Subject:\r?\n\tSecurity ID:\t*\S+\r?\n\tAccount Name:\t*(?<user>\S+)"
+  | rex field=_raw "Value:\t(?<value>.+?)\r?\n"
+  | bucket _time span=1m
+  | stats values(value) as value by _time DN user
+  | rename DN as target
+  | table user target value
+how_to_implement: >-
+  Required a real infra fix, matching the DNS Record Creation precedent:
+  no object SACL existed anywhere covering `scriptPath` writes, so 5136
+  never fired for this attribute despite "Directory Service Changes"
+  auditing being on domain-wide. Added a domain-root-scoped
+  ActiveDirectoryAuditRule for WriteProperty on the `scriptPath` schema
+  attribute, restricted via `InheritedObjectType` to user-class descendants
+  only (not every object type), applied live to dc1 and added to
+  cyber-range's `configure_sacls_dc.ps1` for durability. **Real Splunk
+  extraction quirk found, not a design gap:** unlike most 5136 events,
+  Splunk's automatic field extraction for the object's DN conflicts with
+  the generic `Subject:`/`Account Name:` labels shared across many event
+  types when both a Subject and an unrelated block use the same label
+  text -- used explicit `rex` against `_raw` for `user` to avoid relying on
+  auto-extraction, matching the pattern already established for 4662/DCSync
+  this session. `DN` itself extracts cleanly as its own field (confirmed
+  via testing), used directly for `target`.
+known_false_positives: >-
+  None expected -- no legitimate logon-script assignment workflow exists in
+  this range after initial provisioning.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    ldap3 (NTLM bind as CYBERHAWKS\user, which holds a GenericWrite-
+    equivalent grant on ssmith per this range's design) MODIFY_REPLACE of
+    ssmith's scriptPath to "evil.bat"
+  result: >-
+    Fired exactly once, correctly reporting user=user, target=CN=ssmith,...,
+    value=evil.bat. ssmith's scriptPath cleared back to unset afterward.
+embed:
+  title: ScriptPath Attribute Tampering
+  additional_fields:
+    - target
+    - value
+references:
+  - 'detections/backlog.md, "AD persistence & privilege escalation" (backlog row: "ScriptPath attribute tampering")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false
