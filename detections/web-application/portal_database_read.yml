@@ -1,0 +1,80 @@
+name: Database Credential Read (admin)
+id: web-application-portal-database-read
+version: 1
+date: '2026-09-27'
+status: production
+category: web-application
+description: >-
+  The `CyberHawksPortal` database's `Users` table read by any principal
+  other than the web app's own expected service context (`svc-web`
+  querying from the `web` host itself). Two independent paths land here:
+  the leaked `svc-web` SQL login (from `Web.config.bak`) used from
+  anywhere else, and `CyberHawksPortal` being readable via Windows Auth by
+  any domain user regardless of the leak.
+data_source:
+  - >-
+    SQL Server Extended Events (`mssql_xe_text`, the same `detection_sql_text`
+    session already used by the SQL Server category), matching a `Users`
+    table read and excluding the app's own expected `svc-web`-from-`web`
+    access pattern
+search: |-
+  index=mssql sourcetype=mssql_xe_text sql_text="*FROM Users*"
+  | where NOT (username="svc-web" AND client_hostname="WEB")
+  | bucket _time span=1m
+  | stats values(username) as user by _time
+  | table user
+how_to_implement: >-
+  No infra fix needed for the detection itself -- the `detection_sql_text`
+  XE session and its DB Connect forwarding were already set up for the SQL
+  Server category. **Real operational incident hit and fixed during this
+  detection's own testing, not caused by the detection logic:** resetting
+  the XE session mid-session (to test a hypothesis about stale field
+  extraction) left the `sql1_mssql_xe_text` DB Connect input stuck in a
+  persistent `Connection is closed` failure loop (readCount=0 every cycle)
+  -- confirmed this would have silently broken the three other already-
+  shipped SQL Server detections that share this same data source
+  (xp_cmdshell, xp_dirtree, Linked Server Execution). Neither a plain
+  Splunk restart nor a `STATE=STOP`/`START` cycle alone fixed it; required
+  a full `Restart-Service MSSQLSERVER` on sql1 (clearing whatever internal
+  connection/file-handle state was actually stuck) followed by one more
+  clean stop/clear-files/start of the XE session itself. Confirmed fully
+  recovered by checking DB Connect's own job log for a `COMPLETED` status
+  with a real `readCount`, not just assuming a fix worked. **Design
+  decision, not empirically verified:** the `svc-web`-from-`WEB` exclusion
+  matches the planner's own stated intent ("anything other than the web
+  app's own expected service context") but could not be confirmed against
+  real portal login traffic, since the portal had generated zero queries
+  in the 24h prior to testing (no automated traffic hits it) -- revisit if
+  this exclusion ever produces an unexpected miss once the portal sees
+  real use.
+known_false_positives: >-
+  The web app's own expected access pattern (`svc-web` querying from
+  `WEB`) is excluded. No other legitimate reader of this table exists in
+  this range's design.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    Two independent paths tested: (1) the real leaked `svc-web` credential
+    retrieved via `curl http://10.0.2.5/Web.config.bak` (confirmed working
+    HTTP GET, independent of the IIS log-forwarding gap that blocks that
+    detection specifically), used via pymssql to `SELECT * FROM Users`;
+    (2) the same query via Windows Auth as the plain domain user `dsmith`,
+    with no special rights
+  result: >-
+    Both fired exactly once each, correctly reporting user=svc-web and
+    user=CYBERHAWKS\dsmith respectively -- confirming both independent
+    misconfigurations this row is designed to catch.
+embed:
+  title: Database Credential Read (admin)
+  additional_fields:
+    - user
+references:
+  - 'detections/backlog.md, "Web application" (backlog row: "Portal database read via leaked or permissive credentials")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false
