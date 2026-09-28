@@ -1,0 +1,101 @@
+name: Pass-the-Ticket
+id: credential-dumping-pass-the-ticket
+version: 1
+date: '2026-09-27'
+status: production
+category: credential-dumping
+description: >-
+  A Kerberos service ticket (TGS-REQ) requested from an IP that has never
+  itself been observed performing the initial authentication (AS-REQ) for
+  that same client principal -- the signature of a stolen/copied TGT (or
+  TGS) being reused from a second host rather than the one that originally
+  obtained it.
+data_source:
+  - >-
+    Zeek `kerberos.log` -- TGS-REQ events whose source IP is absent from the
+    set of IPs that have issued an AS-REQ for the same client principal
+    within a 1-day lookback
+search: |-
+  index=zeek sourcetype=zeek:kerberos request_type=TGS service!="krbtgt/*"
+  | join type=left client [
+      search index=zeek sourcetype=zeek:kerberos request_type=AS earliest=-1d
+      | stats values(id_orig_h) as as_ips by client
+    ]
+  | eval already_known=if(isnull(as_ips), 0, if(mvfind(as_ips, id_orig_h)>=0, 1, 0))
+  | where already_known=0
+  | eval origin=mvindex(as_ips, 0)
+  | rename id_orig_h as destination
+  | bucket _time span=1m
+  | stats values(origin) as origin values(service) as service by _time client destination
+  | table client origin destination service
+how_to_implement: >-
+  No infra fix needed for the detection logic itself -- Zeek's
+  `kerberos.log` and its `request_type`/`client`/`service`/`id_orig_h`
+  fields were already forwarded and extracted correctly (this project's
+  existing `zeek_kerberos_fields` extraction, set up in an earlier
+  session). **Real infra finding hit while designing the live test, not
+  fixed (see known_false_positives/notes below):** the originally-planned
+  test technique -- request a TGT on john-kali, copy the ccache to the
+  `test` box (10.0.2.10, same `ad` vnet as the DCs), and request a service
+  ticket from there -- produced connections that Zeek's `conn.log` shows
+  with `conn_state=OTH` and `service=-` (protocol detection failure) for
+  ANY guest-to-guest traffic on the `ad` vnet (confirmed not test-specific:
+  workstation's routine Kerberos traffic to dc1 shows the same OTH
+  classification), so no `kerberos.log` entry is ever produced for
+  same-vnet inter-guest traffic at all. This is very likely a side effect
+  of 2026-09-27's earlier per-guest vnet-mirroring fix (mirror-vnet-guests.sh)
+  double-capturing same-vnet flows from both peers' own mirrored taps,
+  corrupting Zeek's TCP stream reassembly for protocol analyzers that need
+  a clean stream (kerberos.log, ldap.log, dce_rpc.log) -- conn.log's basic
+  5-tuple/byte-count fields are unaffected, only the deep protocol decode
+  is. **Worked around, not fixed:** tested instead by adding a second IP
+  (192.168.1.199) to john-kali's own interface and a host route for
+  10.0.2.2 via it, requesting the service ticket a second time from that
+  IP -- this still crosses the router (cross-vnet, single capture point via
+  the router's own mirrored tap), avoiding the same-vnet double-capture
+  path entirely, and produced a clean second kerberos.log entry. **This
+  same-vnet decode gap needs a dedicated investigation in
+  defense-tooling/cyber-range before any future detection that specifically
+  requires Zeek-decoded protocol content for traffic BETWEEN TWO RANGE
+  HOSTS** (not from an external attacker box) -- flagged for a future
+  session rather than guessed at further here, matching this project's
+  precedent for the LLMNR/coercion mirroring investigations. Detections
+  relying only on Windows Events (with their own IP fields) or on
+  conn.log's basic metadata are unaffected.
+known_false_positives: >-
+  None observed in a 24h lookback prior to the live test. **Design caveat,
+  not yet triggered in this range:** Kerberos constrained delegation
+  (S4U2Self/S4U2Proxy) legitimately produces a TGS-REQ for a user's client
+  principal originating from the delegating SERVICE's own IP, which never
+  itself did that user's AS-REQ -- this would false-positive under this
+  logic. Confirmed not an issue for this range's own SQL Server
+  linked-server chain (sql1->sql2 uses static `sa`-credential mapping, not
+  Kerberos protocol transition, per cyber-range's VULNERABLE_RANGE_PLAN.md
+  Phase F) -- revisit if constrained delegation is ever legitimately added.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11 and a second self-assigned IP, 192.168.1.199)
+  technique: >-
+    impacket-getTGT for dsmith, then impacket-getST -spn cifs/sql1.cyberhawks.lab
+    -k -no-pass using the same cached TGT twice -- once from 192.168.1.11
+    (the original AS-REQ's source), once from 192.168.1.199 (no AS-REQ ever
+    seen from this IP for dsmith)
+  result: >-
+    Fired exactly once, correctly identifying origin=192.168.1.11,
+    destination=192.168.1.199, client=dsmith/CYBERHAWKS.LAB,
+    service=cifs/sql1.cyberhawks.lab. Cleanup: removed the temporary
+    secondary IP/route from john-kali afterward.
+embed:
+  title: Pass-the-Ticket
+  additional_fields:
+    - origin
+    - destination
+references:
+  - 'detections/backlog.md, "Credential & ticket dumping" (backlog row: "Pass-the-ticket / ticket reuse")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

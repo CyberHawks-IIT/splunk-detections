@@ -1,0 +1,87 @@
+name: Domain Replication (DCSync)
+id: credential-dumping-dcsync
+version: 1
+date: '2026-09-27'
+status: production
+category: credential-dumping
+description: >-
+  A non-machine account exercising the DS-Replication-Get-Changes or
+  DS-Replication-Get-Changes-All extended right at the domain root -- the
+  DRSUAPI-level access underlying `secretsdump.py -just-dc`/mimikatz
+  `lsadump::dcsync`. Legitimate use of this right is limited to the domain
+  controllers' own machine accounts replicating with each other, so any
+  other principal invoking it is DCSync.
+data_source:
+  - >-
+    Windows Events -- 4662 (Directory Service Access, Control Access) on the
+    domain root object, filtered to the DS-Replication-Get-Changes
+    ({1131f6aa-9c07-11d1-f79f-00c04fc2dcd2}) and
+    DS-Replication-Get-Changes-All ({1131f6ad-9c07-11d1-f79f-00c04fc2dcd2})
+    extended-right GUIDs
+search: |-
+  index=windows EventCode=4662 ("1131f6aa-9c07-11d1-f79f-00c04fc2dcd2" OR "1131f6ad-9c07-11d1-f79f-00c04fc2dcd2")
+  | rex field=_raw "Subject\s*:\s*\r?\n\tSecurity ID:\t*\S+\r?\n\tAccount Name:\t*(?<user>\S+)"
+  | rex field=ComputerName "(?<host>[^.]+)"
+  | where NOT match(user, "\$$")
+  | bucket _time span=1m
+  | stats count by _time user host
+  | table user host
+how_to_implement: >-
+  No forwarder/audit-policy fix needed this time -- "Directory Service
+  Access" auditing was already on and 4662 already forwarded; the audit ACE
+  granting Success auditing on Control Access to Domain Users already
+  existed on the domain root (`dsacls "DC=cyberhawks,DC=lab" /A`) and fired
+  correctly for both the attacker and the DCs' own machine-account
+  replication traffic, confirmed via live testing. **Real Splunk
+  field-extraction quirk found and worked around, not an infra gap:** this
+  event's raw text renders "Subject :" with a space before the colon
+  (unlike almost every other Windows security event, which renders
+  "Subject:" with no space), so Splunk's standard Account_Name/
+  Subject_Account_Name field extraction silently fails for this specific
+  event type -- confirmed via `| fieldsummary` showing no populated
+  Subject_Account_Name for any 4662 event. Worked around with an explicit
+  `rex` against `_raw` instead of relying on the auto-extracted field.
+  Filtered out machine accounts ($-suffixed) rather than naming DC1$/DC2$
+  specifically, matching this project's existing convention (e.g. NetNTLMv1
+  Authentication) of excluding by account-name shape rather than a
+  hardcoded host list.
+known_false_positives: >-
+  None expected -- no other principal should ever exercise this right in
+  this range. **Scoping decision, not a gap:** the backlog's original design
+  called for correlating this event to Zeek `conn.log` for a source IP, but
+  live testing found the DRSUAPI call arrives over the RPC endpoint mapper
+  (TCP/135), which is extremely high-volume, generic background traffic
+  (every domain-joined host in the range calls it constantly for unrelated
+  RPC services) -- a same-timestamp correlation would be too noisy to
+  reliably attribute to the right connection and risks mis-attributing an
+  innocent host's IP to the actual attacker. Left unattempted rather than
+  shipping an unreliable join; `user` (the account name) is the available
+  attribution instead, same documented-gap pattern as Machine Account
+  Creation/Privileged Group Membership.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    impacket-secretsdump -just-dc-user krbtgt 'cyberhawks.lab/user:password@10.0.2.2'
+    (the range's own designed DCSync-privileged account, "user" -- see
+    cyber-range's VULNERABLE_RANGE_PLAN.md Phase D/L)
+  result: >-
+    krbtgt's NT hash and Kerberos keys dumped successfully. Fired exactly
+    once (3 4662 events -- one per extended right checked -- correctly
+    bucketed into a single alert); DC1$'s own simultaneous replication
+    traffic to the same object correctly excluded by the machine-account
+    filter.
+embed:
+  title: Domain Replication (DCSync)
+  additional_fields:
+    - user
+    - host
+references:
+  - 'detections/backlog.md, "Credential & ticket dumping" (backlog row: "DCSync")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

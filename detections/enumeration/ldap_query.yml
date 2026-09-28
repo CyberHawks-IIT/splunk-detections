@@ -1,0 +1,115 @@
+name: LDAP Query
+id: enumeration-ldap-query
+version: 1
+date: '2026-09-27'
+status: production
+category: enumeration
+description: >-
+  A plain LDAP or LDAPS bind/search against a domain controller from an IP
+  not in this range's known static-IP inventory (i.e. not one of the range's
+  own domain-joined hosts) -- the network-visible half of any LDAP-based
+  enumeration tool (ldapsearch, BloodHound's SharpHound, netexec's `--users`/
+  `--groups`, etc). Correlated back to the DC's own 1644 "Field Engineering"
+  diagnostic log (logging every query, not just expensive ones, per the
+  registry thresholds below) by matching the TCP source port, which pulls
+  the actual LDAP filter and bind account for the plain-LDAP case.
+data_source:
+  - >-
+    Zeek `conn.log` (TCP/389 for plain LDAP, TCP/636 for LDAPS, since Zeek
+    can't decrypt the LDAPS wire content) correlated by source port to
+    Windows Events 1644 (Field Engineering, Directory Service log) on the
+    same DC for the query content and bind account
+search: |-
+  index=zeek sourcetype=zeek:conn (id_resp_p=389 OR id_resp_p=636)
+  | lookup known_range_hosts ip AS id_orig_h OUTPUT hostname
+  | where isnull(hostname)
+  | eval protocol=if(id_resp_p=389, "ldap", "ldaps")
+  | rename id_orig_h as Source_Network_Address, id_resp_h as host, id_orig_p as client_port
+  | join type=left client_port [
+      search index=windows LogName="Directory Service" EventCode=1644
+      | rex field=_raw "Client:\r?\n[0-9.]+:(?<client_port>\d+)"
+      | rex field=_raw "Filter:\r?\n\s*(?<query>.+?)\s*\r?\n"
+      | rex field=_raw "User:\r?\n(?<user>\S+)"
+      | table client_port query user
+    ]
+  | bucket _time span=1m
+  | stats values(user) as user values(query) as query by _time Source_Network_Address host protocol
+  | table Source_Network_Address host protocol user query
+how_to_implement: >-
+  Required a real infra fix, found live: the domain-root registry values
+  this detection depends on ("Search Time Threshold (msecs)" and "Expensive
+  Search Results Threshold" under NTDS\Parameters, both already set to 0 by
+  an earlier session) were confirmed present but produced **zero** 1644
+  events under live testing -- the NTDS service on dc1 had never been
+  restarted since those values were set, and (like the SAM/LSA
+  FullPrivilegeAuditing registry value found earlier this session) NTDS
+  reads its diagnostic-logging config once at service start, not live.
+  Fixed by `net stop ntds /y` + `net start ntds` on dc1 (also cycles the
+  Kerberos KDC/DNS Server/DFSR services that depend on NTDS -- confirmed
+  all four came back healthy, DNS took ~15s longer than the others to
+  finish starting, and `repadmin /replsummary` showed 0/5 fails both
+  directions afterward). **Separate real infra fix:** Zeek's `ldap.log`
+  (needed to confirm the plain-LDAP path's content independently of the
+  1644 correlation, and to have a real header to fill in the previously
+  string TBD `zeek_ldap_fields` extraction) had no Splunk field extraction
+  at all -- `dt_detection_content_props.conf`/`transforms.conf` had
+  intentionally left it out (comment: "ldap.log intentionally omitted until
+  a real header can be read"). Read the real `#fields` header off the Zeek
+  sensor's live `ldap.log` and added the `[zeek:ldap]`/`zeek_ldap_fields`
+  stanzas following the exact same REPORT+transforms.conf DELIMS/FIELDS
+  pattern as conn/dns/dce_rpc/kerberos, applied live to the indexer (510).
+  **Real, verified finding, not a gap left unexplored:** LDAPS queries
+  (tested live, same technique over `ldaps://`) do NOT produce a 1644 event
+  at all, confirmed on dc1's local Security... er, Directory Service log
+  directly (zero results even after the NTDS-restart fix that made plain
+  LDAP's 1644 logging work) -- so the join intentionally leaves `user`/
+  `query` empty for the `ldaps` protocol value; `Source_Network_Address`/
+  `host`/`protocol` are the only fields available for encrypted LDAP,
+  exactly as the original backlog design anticipated ("Zeek can't decrypt
+  the wire traffic"). ADWS (TCP/9389) is **not yet implemented in this
+  alert's SPL** -- live-testing it needs a Windows client with the
+  ActiveDirectory PowerShell module reaching the DC on 9389 from a
+  non-domain-joined IP, which wasn't readily available this session (the
+  attacker boxes are Linux); left for a future session rather than shipping
+  the ADWS branch unverified, per this project's own rule against
+  unverified SPL. The backlog's own note already flagged ADWS's client-IP
+  correlation as uncertain even before this gap.
+known_false_positives: >-
+  `known_range_hosts` excludes every domain-joined host's static IP, so
+  ordinary intra-domain LDAP traffic (workstation group policy refresh,
+  member servers querying the DC) never reaches this search. Revisit if a
+  legitimate non-domain-joined tool (a vulnerability scanner, an LDAP-based
+  monitoring agent) is ever added to this range.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    ldapsearch -x -H ldap://10.0.2.2 -D 'dsmith@cyberhawks.lab' -w
+    Summer2026 -b 'DC=cyberhawks,DC=lab' '(description=*)' cn description
+    (an unindexed wildcard search, incidentally surfacing a real leaked
+    credential in csmith's description field -- the separate description-
+    field-password finding under this same category); also
+    LDAPTLS_REQCERT=never ldapsearch ... -H ldaps://10.0.2.2 ... for the
+    LDAPS path
+  result: >-
+    Plain LDAP fired exactly once per query, correctly correlated to the
+    real filter `(description=*)` and bind account `dsmith@cyberhawks.lab`
+    via source-port matching to the 1644 event. LDAPS fired exactly once
+    per connection with protocol=ldaps and no user/query (confirmed real
+    limitation, not a bug -- see how_to_implement).
+embed:
+  title: LDAP Query
+  additional_fields:
+    - host
+    - protocol
+    - user
+    - query
+references:
+  - 'detections/backlog.md, "Enumeration (info pulled)" (backlog row: "LDAP query content")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false

@@ -1,0 +1,70 @@
+name: 'Lateral Movement: WinRM'
+id: lateral-movement-winrm
+version: 1
+date: '2026-09-27'
+status: production
+category: lateral-movement
+description: >-
+  A remote PowerShell/WinRM shell session created on a range host by a
+  source other than this project's own control host. WinRM session
+  establishment (`evil-winrm`, `Enter-PSSession`, `Invoke-Command`) is a
+  common lateral-movement primitive once an attacker has valid credentials
+  -- distinct from PsExec/remote-scheduled-task lateral movement, which are
+  covered by their own detections.
+data_source:
+  - >-
+    Microsoft-Windows-WinRM/Operational, EventCode 91 ("Creating WSMan
+    shell on server" -- fires once per interactive/PowerShell remoting
+    session, with the target account and client IP embedded in the message
+    text)
+search: |-
+  index=windows LogName="Microsoft-Windows-WinRM/Operational" EventCode=91
+  | rex field=_raw "\\\\(?<user>\S+) clientIP: (?<Source_Network_Address>[\d\.]+)\)"
+  | rex field=ComputerName "(?<host>[^.]+)"
+  | where Source_Network_Address!="10.0.2.1"
+  | bucket _time span=1m
+  | stats count by _time Source_Network_Address host user
+  | table Source_Network_Address host user
+how_to_implement: >-
+  No infra fix needed -- the WinRM Operational channel was already
+  forwarded (no whitelist restriction on this channel in monitor.yml).
+  EventCode 91 embeds both the authenticated account and the real client IP
+  directly in its message text (`Creating WSMan shell on server ...
+  (HOST\user clientIP: x.x.x.x)`), which Splunk doesn't auto-extract into
+  fields -- pulled both via `rex` against `_raw` instead of relying on
+  Account_Name/Source_Network_Address, which don't populate for this event
+  type. Excluded this control host's own NAT'd admin IP (10.0.2.1, same
+  address documented in the NTLM Authentication detection) since this
+  project's own live-fire testing and administration constantly uses WinRM
+  against every range host.
+known_false_positives: >-
+  This control host's own administrative WinRM traffic is excluded by IP.
+  No other legitimate WinRM usage exists in this range day-to-day (no
+  configuration-management tooling polls over WinRM here) -- revisit if
+  that changes.
+verification:
+  date: '2026-09-27'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    evil-winrm -i 10.0.2.8 -u Administrator -p '<shared lab password>'
+    against workstation, ran `whoami` (returned workstation\administrator,
+    confirming the session)
+  result: >-
+    Fired exactly once (two EventCode 91 events half a second apart --
+    interactive shell setup issues two shell-creation calls -- correctly
+    bucketed into a single alert), correctly attributing 192.168.1.11 /
+    workstation / Administrator.
+embed:
+  title: 'Lateral Movement: WinRM'
+  additional_fields:
+    - host
+    - user
+references:
+  - 'detections/backlog.md, "Credential & ticket dumping" (backlog row: "WinRM logon")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false
