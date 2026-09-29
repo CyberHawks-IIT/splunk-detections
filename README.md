@@ -6,7 +6,7 @@ Splunk instance. One saved search per attacker behavior, each one written and
 
 > **Setting up the whole range and monitoring?** Start with cyber-range's
 > end-to-end guide,
-> **[range-with-monitoring.md](https://github.com/CyberHawks-IIT/cyber-range/blob/main/docs/setup/range-with-monitoring.md)**.
+> **[range-with-monitoring.md](https://github.com/CyberHawks-IIT/cyber-range/blob/master/docs/setup/range-with-monitoring.md)**.
 > You don't copy anything by hand. defense-tooling's `splunk_indexer` role
 > deploys this repo's `app/` into Splunk when you point `splunk_detections_app_src`
 > at it.
