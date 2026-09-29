@@ -1,0 +1,93 @@
+name: NTDS.dit Extraction
+id: credential-dumping-ntds-dit-extraction
+version: 1
+date: '2026-09-29'
+status: production
+category: credential-dumping
+description: >-
+  A process other than lsass.exe opening or reading a domain controller's
+  `ntds.dit` Active Directory database (under a `\NTDS\` directory, either
+  the live `C:\Windows\NTDS\ntds.dit` or a shadow-copy device path
+  `\Device\HarddiskVolumeShadowCopyN\Windows\NTDS\ntds.dit`) -- the file
+  half of an offline domain credential dump via `ntdsutil ... ifm`, VSS
+  shadow copy, or any equivalent tool. Detected by the object accessed
+  (the AD database), never by the tool. The attacker IP is resolved by
+  tracing the acting session's 4624 logon, defaulting to the DC's own IP
+  when the extraction is run locally.
+data_source:
+  - >-
+    Windows Events -- 4656 (handle-open) / 4663 (read) naming
+    \NTDS\ntds.dit (requires Audit Handle Manipulation + the ntds.dit file
+    SACL), 4624 (logon session -> source IP)
+search: |-
+  index=windows (EventCode=4656 OR EventCode=4663) Object_Name="*NTDS*ntds.dit*" NOT Process_Name="*lsass.exe"
+  | rex field=ComputerName "(?<host_key>[^.]+)"
+  | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
+  | eval host_key=lower(host_key), session_id=lower(session_id)
+  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Source_Network_Address) as logon_src by host_key session_id ]
+  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
+  | eval Source_Network_Address=coalesce(logon_src, host_ip)
+  | bucket _time span=1m
+  | stats values(Account_Name) as user values(Source_Network_Address) as Source_Network_Address by _time host_key
+  | rename host_key as host
+  | table Source_Network_Address host user
+how_to_implement: >-
+  Requires the file-system SACL on `%SystemRoot%\NTDS\ntds.dit`
+  (cyber-range's detection_logging role, configure_sacls_dc.ps1 -- already
+  present) AND "Audit Handle Manipulation" (added 2026-09-28 for the local
+  hive-export detection). Handle Manipulation is what makes this fire:
+  confirmed live 2026-09-27 that a shadow-copy read of ntds.dit did NOT
+  trip the live file's object-access SACL (the shadow volume is a distinct
+  ephemeral device each time, so no persistent SACL can be pre-applied to
+  it), which had left this row blocked. Re-tested 2026-09-29 after Handle
+  Manipulation was enabled range-wide: `ntdsutil ... ifm` now emits 4656
+  (handle-open) and 4663 (read) events naming
+  `\Device\HarddiskVolumeShadowCopyN\Windows\NTDS\ntds.dit` from the
+  extracting process -- the tool-agnostic signal that was previously
+  missing. Detection is action-based: it keys on the ntds.dit object under
+  a \NTDS\ directory (live or shadow path), never on the process name. The
+  lsass.exe exclusion is baseline-noise filtering (lsass holds ntds.dit
+  open constantly), not a tool match -- the same allowed exclusion used by
+  the SAM/LSA hive-dump detections. IP trace uses the acting session's
+  Logon ID -> 4624 Source Network Address; known_range_hosts resolves the
+  DC's own IP for the local-IFM default case.
+known_false_positives: >-
+  None expected -- no non-lsass process legitimately reads ntds.dit in this
+  range post-provisioning. Legitimate DC backup software (if ever deployed)
+  would also read ntds.dit under backup semantics and would need an
+  exclusion, but none runs in this range. The `*NTDS*ntds.dit*` object
+  filter matches both the live database path and any shadow-copy device
+  path, and does not match an attacker-chosen IFM destination copy (which
+  lives outside a \NTDS\ directory), so it keys on the source read, not the
+  copy-out.
+verification:
+  date: '2026-09-29'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: dc1 itself, via ntdsutil IFM run under an Administrator WinRM session
+  technique: >-
+    ntdsutil "activate instance ntds" "ifm" "create full C:\Temp\ifm" --
+    creates a VSS shadow copy of the DC and copies ntds.dit + the SYSTEM/
+    SECURITY hives out of it (the on-box half of a domain credential dump).
+    ntdsutil is only a convenient driver; the search matches neither its
+    name nor its command line, only the 4656/4663 telemetry any tool
+    reading ntds.dit off the live or shadow path would produce.
+  result: >-
+    Fired once. 4656 (handle-open) and 4663 (read) events named
+    \Device\HarddiskVolumeShadowCopy1\Windows\NTDS\ntds.dit from a
+    non-lsass process, user=Administrator, host=dc1,
+    Source_Network_Address resolved to the DC's own IP (10.0.2.2) via the
+    local-session default (the IFM ran locally under a WinRM session whose
+    4624 carried no source). IFM output directory removed afterward.
+embed:
+  title: NTDS.dit Extraction
+  additional_fields:
+    - host
+    - user
+references:
+  - 'detections/backlog.md, "Credential & ticket dumping" (backlog row: "NTDS.dit extraction (IFM / shadow copy on a DC)")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false
