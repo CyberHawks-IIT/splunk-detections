@@ -30,7 +30,8 @@ search: |-
   | bucket _time span=1m
   | stats values(Account_Name) as user values(Source_Network_Address) as Source_Network_Address by _time host_key
   | rename host_key as host
-  | table Source_Network_Address host user
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip host user
 how_to_implement: >-
   Requires the file-system SACL on `%SystemRoot%\NTDS\ntds.dit`
   (cyber-range's detection_logging role, configure_sacls_dc.ps1 -- already

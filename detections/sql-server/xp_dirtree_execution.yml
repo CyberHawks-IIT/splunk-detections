@@ -20,7 +20,8 @@ search: |-
   | rename username as user
   | lookup known_range_hosts hostname AS host OUTPUT ip AS host_ip
   | join type=left host_ip [ search index=zeek sourcetype=zeek:conn id_resp_p=1433 NOT id_orig_h="10.0.10.2" | lookup known_range_hosts ip AS id_orig_h OUTPUT hostname AS src_known | where isnull(src_known) | rename id_resp_h as host_ip | stats latest(id_orig_h) as Source_Network_Address by host_ip ]
-  | table Source_Network_Address host user path
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip host user path
 how_to_implement: >-
   Same data source and operational gotcha as xp_cmdshell Execution --
   DB Connect's `detection_sql_text` XE input, already live. See that

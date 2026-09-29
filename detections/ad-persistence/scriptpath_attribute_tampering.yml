@@ -29,7 +29,8 @@ search: |-
   | bucket _time span=1m
   | stats values(value) as value values(Source_Network_Address) as Source_Network_Address by _time DN user
   | rename DN as target
-  | table Source_Network_Address user target value
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip user target value
 how_to_implement: >-
   Required a real infra fix, matching the DNS Record Creation precedent:
   no object SACL existed anywhere covering `scriptPath` writes, so 5136
@@ -72,6 +73,7 @@ verification:
 embed:
   title: ScriptPath Attribute Tampering
   additional_fields:
+    - user
     - target
     - value
 references:

@@ -20,7 +20,8 @@ search: |-
   | eval Client_Address=replace(Client_Address, "^::ffff:", "")
   | bucket _time span=1m
   | stats values(Account_Name) as users by _time Client_Address
-  | table Client_Address users
+  | rename Client_Address as attacker_ip
+  | table attacker_ip users
 how_to_implement: >-
   Requires defense-tooling's Windows forwarder shipping Security log 4768
   from the DCs (already forwarded per the monitoring rollout plan). No

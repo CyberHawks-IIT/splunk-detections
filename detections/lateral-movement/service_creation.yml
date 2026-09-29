@@ -30,7 +30,8 @@ search: |-
   | eval path=case(has_4697=1 AND subj_type!=3,"local", has_4697=1 AND (src=="10.0.2.1" OR isnull(src)),"admin", has_4697=1,"lateral", true(),"local")
   | where path="lateral"
   | rename src as Source_Network_Address, host_key as host, Service_Name as service, subj_acct as user
-  | table Source_Network_Address host user service
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip host user service
 how_to_implement: >-
   No infra fix needed -- 7045/4624 already forwarded. Same control-host
   exclusion finding and fix as Lateral Movement: Scheduled Task (see that
@@ -68,7 +69,7 @@ verification:
 embed:
   title: 'Lateral Movement: Service'
   additional_fields:
-    - target
+    - host
     - user
     - service
 references:

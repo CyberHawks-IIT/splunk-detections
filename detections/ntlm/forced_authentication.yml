@@ -35,7 +35,8 @@ search: |-
     ]
   | bucket _time span=1m
   | stats values(type) as type values(user) as user by _time Source_Network_Address host
-  | table Source_Network_Address host type user
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip host type user
 how_to_implement: >-
   Requires defense-tooling's Zeek sensor forwarding conn.log (already
   forwarded). No infra fix needed for this final approach -- but getting

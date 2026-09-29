@@ -23,7 +23,8 @@ search: |-
   | bucket _time span=10s
   | stats count values(Object_Name) as files values(Source_Network_Address) as Source_Network_Address by _time ComputerName Account_Name
   | rename ComputerName as host, Account_Name as user
-  | table Source_Network_Address host user files
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip host user files
 how_to_implement: >-
   Requires the file-system SACL on the Protect and Credentials folders
   (cyber-range's detection_logging role) and the "File System" audit

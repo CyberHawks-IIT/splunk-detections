@@ -31,7 +31,8 @@ search: |-
   | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
   | eval Source_Network_Address=host_ip
   | rename host_key as host, Service_Name as service, subj_acct as user
-  | table Source_Network_Address host user service
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip host user service
 how_to_implement: >-
   No infra fix needed -- shares its data source with Lateral Movement:
   Service, the inverted branch of the same join. **Documented gap, same as
@@ -67,7 +68,8 @@ verification:
 embed:
   title: Service Creation (Local)
   additional_fields:
-    - target
+    - host
+    - user
     - service
 references:
   - 'detections/backlog.md, "Host persistence" (backlog row: "Malicious local service creation")'

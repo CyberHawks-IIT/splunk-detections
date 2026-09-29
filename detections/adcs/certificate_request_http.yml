@@ -36,7 +36,8 @@ search: |-
       | stats latest(c_ip) as Source_Network_Address by user
     ]
   | stats values(Source_Network_Address) as Source_Network_Address values(user) as user values(Certificate_Template) as template by id
-  | table Source_Network_Address user template id
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip user template id
 how_to_implement: >-
   Requires IIS log forwarding from `ca` (index=iis, ms:iis:auto -- see
   defense-tooling's splunk_forwarder_windows role; ca's IIS logging exists

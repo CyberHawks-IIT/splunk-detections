@@ -31,7 +31,8 @@ search: |-
   | bucket _time span=1m
   | stats values(objects) as objects values(method) as method by _time src host
   | rename src as Source_Network_Address
-  | table Source_Network_Address host method objects
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip host method objects
 how_to_implement: >-
   Requires defense-tooling's Zeek sensor forwarding dce_rpc.log (already
   forwarded, already used by the DCSync/ADCS rows in this backlog). No

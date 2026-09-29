@@ -18,7 +18,8 @@ search: |-
   | eval share=mvindex(split(Share_Name, "\\"), -1)
   | bucket _time span=1m
   | stats values(share) as share values(ComputerName) as host by _time Source_Address
-  | table Source_Address host share
+  | rename Source_Address as attacker_ip
+  | table attacker_ip host share
 how_to_implement: >-
   Same infra fix as NETLOGON Share Read / SYSVOL Share Read -- "Detailed
   File Share" auditing was not enabled anywhere in the range; fixed in

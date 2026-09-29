@@ -27,7 +27,8 @@ search: |-
   | eval Source_Network_Address=coalesce(logon_src, host_ip)
   | bucket _time span=1m
   | stats values(Subject_Account_Name) as user values(Source_Network_Address) as Source_Network_Address by _time Group_Name target type
-  | table Source_Network_Address user type target
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip user type target
 how_to_implement: >-
   Required a real infra fix: 4728/4732/4756 (the "add member" events) were
   already in defense-tooling's Security-channel forwarder whitelist, but
@@ -72,8 +73,8 @@ verification:
 embed:
   title: Privileged Group Membership
   additional_fields:
-    - type
     - user
+    - type
     - target
 references:
   - 'detections/backlog.md, "AD persistence & privilege escalation" (backlog row: "New Domain Admin / privileged group membership change")'

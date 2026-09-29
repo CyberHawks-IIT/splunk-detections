@@ -24,7 +24,8 @@ search: |-
   | join type=left host_ip [ search index=zeek sourcetype=zeek:conn id_resp_p=1433 NOT id_orig_h="10.0.10.2" | lookup known_range_hosts ip AS id_orig_h OUTPUT hostname AS src_known | where isnull(src_known) | rename id_resp_h as host_ip | stats latest(id_orig_h) as Source_Network_Address by host_ip ]
   | bucket _time span=1m
   | stats values(impersonated) as impersonated values(Source_Network_Address) as Source_Network_Address by _time host user
-  | table Source_Network_Address host user impersonated
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip host user impersonated
 how_to_implement: >-
   Requires defense-tooling's DB Connect setup already forwarding
   `detection_impersonation_audit`'s output into the `mssql` index

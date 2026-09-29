@@ -26,7 +26,8 @@ search: |-
   | bucket _time span=1m
   | stats values(Object_Name) as script values(Source_Network_Address) as Source_Network_Address by _time ComputerName Subject_Account_Name
   | rename ComputerName as host, Subject_Account_Name as user
-  | table Source_Network_Address host user script
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip host user script
 how_to_implement: >-
   No infra fix needed this time -- the object SACL on
   `SYSVOL\domain\scripts` (Everyone, FullControl, Success+Failure,
@@ -61,6 +62,7 @@ embed:
   title: Logon Script Tampering
   additional_fields:
     - host
+    - user
     - script
 references:
   - 'detections/backlog.md, "AD persistence & privilege escalation" (backlog row: "Logon script tampering")'

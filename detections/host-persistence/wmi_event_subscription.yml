@@ -20,7 +20,8 @@ search: |-
   | stats values(User) as user values(eval(if(EventID=19,obj_name,null()))) as producer values(eval(if(EventID=20,obj_name,null()))) as consumer values(eval(if(EventID=21,"yes",null()))) as binding by _time host
   | eval host_key=lower(host)
   | lookup known_range_hosts hostname AS host_key OUTPUT ip AS Source_Network_Address
-  | table Source_Network_Address host user producer consumer binding
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip host user producer consumer binding
 how_to_implement: >-
   No infra fix needed -- Sysmon's `WmiEvents` rule group in
   `sysmon_config.xml` already has an empty `onmatch="exclude"` filter
@@ -59,6 +60,7 @@ embed:
   title: WMI Event Subscription Creation
   additional_fields:
     - host
+    - user
     - producer
     - consumer
     - binding

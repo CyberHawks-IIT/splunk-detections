@@ -24,7 +24,8 @@ search: |-
   | bucket _time span=1m
   | stats values(Subject_Account_Name) as user values(Source_Network_Address) as Source_Network_Address by _time SAM_Account_Name
   | rename SAM_Account_Name as account
-  | table Source_Network_Address user account
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip user account
 how_to_implement: >-
   No infra fix needed -- 4741 auditing (Computer Account Management,
   already covered by the existing "Account Management" audit subcategory)

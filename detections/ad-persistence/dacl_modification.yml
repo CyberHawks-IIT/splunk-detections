@@ -30,7 +30,8 @@ search: |-
   | bucket _time span=1m
   | stats values(descriptor) as descriptor values(Source_Network_Address) as Source_Network_Address by _time user DN
   | rename DN as target
-  | table Source_Network_Address user target descriptor
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip user target descriptor
 how_to_implement: >-
   No new infra fix needed -- the only object SACL in this range covering
   `nTSecurityDescriptor` writes (GenericAll, Success+Failure) is on the
@@ -80,6 +81,7 @@ verification:
 embed:
   title: DACL Modification
   additional_fields:
+    - user
     - target
     - descriptor
 references:

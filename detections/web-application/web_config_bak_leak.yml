@@ -22,7 +22,8 @@ search: |-
   index=iis host=WEB sc_status=200 (cs_uri_stem="*.bak" OR cs_uri_stem="*.old" OR cs_uri_stem="*.backup" OR cs_uri_stem="*.save" OR cs_uri_stem="*.orig" OR cs_uri_stem="*.config" OR cs_uri_stem="*~")
   | rename c_ip as Source_Network_Address, cs_uri_stem as file
   | stats values(file) as file by Source_Network_Address
-  | table Source_Network_Address file
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip file
 how_to_implement: >-
   Requires IIS log forwarding from `web` -- landed in `index=iis` via the
   `ms:iis:auto` sourcetype with forwarder-side `INDEXED_EXTRACTIONS=w3c`

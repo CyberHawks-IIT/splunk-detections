@@ -17,7 +17,8 @@ search: |-
   | where NOT match(Account_Name, "\$$")
   | bucket _time span=1m
   | stats values(Relative_Target_Name) as files values(ComputerName) as host by _time Source_Address
-  | table Source_Address host files
+  | rename Source_Address as attacker_ip
+  | table attacker_ip host files
 how_to_implement: >-
   Same infra fix as NETLOGON Share Read -- "Detailed File Share" auditing
   was not enabled anywhere in the range; fixed in cyber-range's

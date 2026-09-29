@@ -26,7 +26,8 @@ search: |-
   | bucket _time span=1m
   | stats values(Source_Network_Address) as Source_Network_Address by _time username
   | rename username as user
-  | table Source_Network_Address user
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip user
 how_to_implement: >-
   No infra fix needed for the detection itself -- the `detection_sql_text`
   XE session and its DB Connect forwarding were already set up for the SQL

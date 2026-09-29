@@ -31,7 +31,8 @@ search: |-
   | eval Source_Network_Address=coalesce(logon_src, host_ip)
   | bucket _time span=1m
   | stats values(Source_Network_Address) as Source_Network_Address by _time user host
-  | table Source_Network_Address user host
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip user host
 how_to_implement: >-
   No forwarder/audit-policy fix needed this time -- "Directory Service
   Access" auditing was already on and 4662 already forwarded; the audit ACE

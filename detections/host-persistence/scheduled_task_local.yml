@@ -31,7 +31,8 @@ search: |-
   | stats values(Subject_Account_Name) as user values(host_ip) as host_ip by _time host_key Task_Name
   | eval Source_Network_Address=host_ip
   | rename host_key as host, Task_Name as task
-  | table Source_Network_Address host user task
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip host user task
 how_to_implement: >-
   No infra fix needed -- shares its data source with Lateral Movement:
   Scheduled Task, just the inverted `isnull()` branch of the same join.
@@ -73,7 +74,8 @@ verification:
 embed:
   title: Scheduled Task Creation (Local)
   additional_fields:
-    - target
+    - host
+    - user
     - task
 references:
   - 'detections/backlog.md, "Host persistence" (backlog row: "Local scheduled task persistence")'

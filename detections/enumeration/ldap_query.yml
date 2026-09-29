@@ -56,7 +56,8 @@ search: |-
   | eval user=if(protocol="adws", if(in_window=1, adws_user, null()), user), query=if(protocol="adws", if(in_window=1, adws_query, null()), query)
   | bucket _time span=1m
   | stats values(user) as user values(query) as query by _time Source_Network_Address host protocol
-  | table Source_Network_Address host protocol user query
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip host protocol user query
 how_to_implement: >-
   **1644 must log every search, and the thresholds must be 1, not 0.**
   cyber-range's `configure_1644.ps1` sets Field Engineering (NTDS\Diagnostics

@@ -27,7 +27,8 @@ search: |-
   | bucket _time span=5m
   | stats values(Service_Name) as users dc(Service_Name) as distinct_services values(encryption) as encryption values(Ticket_Encryption_Type) as raw_enc by _time Client_Address
   | where distinct_services>=2 OR like(raw_enc,"%0x17%")
-  | table Client_Address users encryption
+  | rename Client_Address as attacker_ip
+  | table attacker_ip users encryption
 how_to_implement: >-
   Requires defense-tooling's Windows forwarder shipping Security log 4769
   from the DCs (already forwarded). No infra fix needed. The

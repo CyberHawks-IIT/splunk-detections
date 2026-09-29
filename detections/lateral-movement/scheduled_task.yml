@@ -29,7 +29,8 @@ search: |-
   | bucket _time span=1m
   | stats values(Subject_Account_Name) as user by _time src host_key Task_Name
   | rename src as Source_Network_Address, host_key as host, Task_Name as task
-  | table Source_Network_Address host user task
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip host user task
 how_to_implement: >-
   No infra fix needed -- 4698/4624 were already forwarded and used by
   other detections. **Real design finding from live testing:** a naive
@@ -75,7 +76,7 @@ verification:
 embed:
   title: 'Lateral Movement: Scheduled Task'
   additional_fields:
-    - target
+    - host
     - user
     - task
 references:

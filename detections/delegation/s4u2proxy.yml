@@ -1,0 +1,96 @@
+name: 'Delegation: S4U2Proxy'
+id: delegation-s4u2proxy
+version: 1
+date: '2026-09-29'
+status: production
+category: delegation
+description: >-
+  Kerberos constrained-delegation abuse -- the S4U2Proxy exchange, in which
+  a service account holding `msDS-AllowedToDelegateTo` requests a service
+  ticket to a downstream SPN *on behalf of another user* (constrained
+  delegation, T2A4D). Combined with S4U2Self this lets an attacker who
+  controls the delegating account impersonate any user (up to a Domain
+  Admin) to the allowed target service without that user's password. In
+  this range `sql2$` is configured for protocol-transition constrained
+  delegation to `cifs/dc1`, so any S4U2Proxy is signal.
+data_source:
+  - >-
+    Windows Events -- 4769 (Kerberos service ticket requested) with the
+    `Transited Services` field populated (the S4U2Proxy signature; blank on
+    every ordinary TGS request).
+  - >-
+    Zeek `kerberos.log` -- the same TGS-REQ, used only to recover the
+    impersonated principal (its `client` field) and the full target SPN,
+    neither of which the Windows 4769 event carries. Correlated on attacker
+    IP + event second.
+search: |-
+  index=windows EventCode=4769
+  | rex field=_raw "Transited Services:\s*(?<transited>[^\r\n]+)"
+  | where isnotnull(transited) AND transited!="-"
+  | eval attacker_ip=replace(Client_Address,"^::ffff:","")
+  | eval user=replace(Account_Name,"@.*",""), service=Service_Name
+  | rex field=_raw "Logon GUID:\s*(?<logon_guid>\S+)"
+  | eval tkey=attacker_ip.":".floor(_time)
+  | join type=left tkey [
+      search index=zeek sourcetype=zeek:kerberos request_type=TGS
+      | eval tkey=id_orig_h.":".floor(_time), imp=replace(client,"/.*","")
+      | stats values(imp) as impersonated values(eval(if(like(service,"%/%"),service,null()))) as service_spn by tkey ]
+  | eval service=coalesce(service_spn, service)
+  | stats values(attacker_ip) as attacker_ip values(user) as user values(impersonated) as impersonated by logon_guid service
+  | table attacker_ip user service impersonated
+how_to_implement: >-
+  No infra fix needed -- 4769 from the DCs is already forwarded, and Zeek's
+  `kerberos.log` (with `client`/`service`/`request_type`/`id_orig_h`) is
+  already forwarded and extracted. The `Transited Services` field is not
+  auto-extracted by the Windows TA, so it is pulled with `rex` against
+  `_raw`; it renders on the line following the `Transited Services:` label
+  for a populated value, which the `\s*` (newline-crossing) match handles.
+  `user` (the delegating account) equals both `Account_Name` and the
+  `Transited Services` value. `service` is taken from Zeek (the full SPN,
+  e.g. `cifs/dc1.cyberhawks.lab`) when available, falling back to the
+  Windows `Service_Name` (the target's machine account, e.g. `DC1$`) when
+  Zeek did not decode the flow. The impersonated principal is recovered
+  from Zeek's `client` field -- Windows Server 2016 does not log it in 4769
+  (confirmed live: the impersonated user appears in neither the 4769 nor
+  the 4768 TGT event), so this is the only available source. See the
+  known_false_positives note on Zeek availability.
+known_false_positives: >-
+  None expected -- no legitimate constrained delegation happens in this
+  range after provisioning. Baseline check: zero 4769 events with a
+  populated `Transited Services` field in 24h before the live test. **Field
+  availability note:** the `impersonated` and full-SPN `service` values come
+  from Zeek, which only decodes Kerberos cleanly for traffic that crosses
+  the range router (the default attacker path, john-kali -> DC). For an
+  S4U2Proxy launched from a host on the DC's own vnet, Zeek's protocol
+  decode is unreliable (the documented same-vnet double-capture gap), so
+  `impersonated` may be blank and `service` falls back to the machine
+  account name -- the detection still fires on the Windows 4769 signal
+  either way.
+verification:
+  date: '2026-09-29'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    impacket-getST -spn cifs/dc1.cyberhawks.lab -impersonate Administrator
+    -dc-ip 10.0.2.2 'cyberhawks.lab/sql2$' -hashes :<sql2$ NT hash>
+    (sql2$ hash obtained by DCSync). This performs S4U2Self then S4U2Proxy
+    against dc1, impersonating Administrator to cifs/dc1.
+  result: >-
+    Fired exactly once, correctly reporting attacker_ip=192.168.1.11,
+    user=sql2$, service=cifs/dc1.cyberhawks.lab, impersonated=Administrator.
+    The paired S4U2Self (same operation) is intentionally suppressed by the
+    'Delegation: S4U2Self' detection, not this one.
+embed:
+  title: 'Delegation: S4U2Proxy'
+  additional_fields:
+    - user
+    - service
+    - impersonated
+references:
+  - 'detections/backlog.md, "AD persistence & privilege escalation" (constrained delegation abuse)'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '*/5 * * * *'
+  earliest: '-5m'
+  latest: now
+disabled: false

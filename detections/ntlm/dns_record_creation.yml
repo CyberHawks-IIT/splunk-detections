@@ -25,7 +25,8 @@ search: |-
   | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Source_Network_Address) as logon_src by host_key session_id ]
   | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
   | eval Source_Network_Address=coalesce(logon_src, host_ip)
-  | table Source_Network_Address user name
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip user name
 how_to_implement: >-
   Required a real infra fix, bigger than the credential-exposure category's
   one: "Directory Service Changes" auditing being on is NOT enough by

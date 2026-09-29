@@ -17,7 +17,8 @@ data_source:
 search: |-
   index=zeek sourcetype=zeek:dns qtype_name=AXFR
   | rename id_resp_h as host
-  | table id_orig_h host
+  | rename id_orig_h as attacker_ip
+  | table attacker_ip host
 how_to_implement: >-
   Requires defense-tooling's Zeek sensor forwarding dns.log (already
   forwarded, already used by the Zone transfer / name-resolution-poisoning

@@ -29,7 +29,8 @@ search: |-
     ]
   | bucket _time span=1m
   | stats values(comm) as tool values(Source_Network_Address) as Source_Network_Address values(auid_name) as user by _time host ses
-  | table Source_Network_Address host user tool
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip host user
 how_to_implement: >-
   No infra fix needed -- the `-w /etc/shadow -p r -k shadow_read` auditd
   rule and the `linux_audit` sourcetype forwarding (with its `ses`/`AUID`

@@ -24,7 +24,8 @@ search: |-
   | where Source_Network_Address!="10.0.2.1"
   | bucket _time span=1m
   | stats count by _time Source_Network_Address host user
-  | table Source_Network_Address host user
+  | rename Source_Network_Address as attacker_ip
+  | table attacker_ip host user
 how_to_implement: >-
   No infra fix needed -- the WinRM Operational channel was already
   forwarded (no whitelist restriction on this channel in monitor.yml).

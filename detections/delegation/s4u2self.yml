@@ -1,0 +1,120 @@
+name: 'Delegation: S4U2Self'
+id: delegation-s4u2self
+version: 1
+date: '2026-09-29'
+status: production
+category: delegation
+description: >-
+  Kerberos constrained-delegation abuse -- the S4U2Self exchange, in which
+  a service account requests a service ticket *to itself* on behalf of an
+  arbitrary user (protocol transition, T2A4D). This is the first half of a
+  full impersonation chain; it is usually followed immediately by an
+  S4U2Proxy to a downstream service. When a matching S4U2Proxy exists this
+  detection stays silent and 'Delegation: S4U2Proxy' fires instead; an
+  S4U2Self with no matching proxy (e.g. `getST -self`, ticket harvested for
+  later use) fires here on its own.
+data_source:
+  - >-
+    Windows Events -- 4769 (Kerberos service ticket requested) where the
+    requesting account equals the target service (Account_Name == the
+    machine account named in Service_Name) and the request originates from
+    an IP that is not the requesting host's own -- a service asking for a
+    ticket to itself from a foreign source.
+  - >-
+    Zeek `kerberos.log` -- the same TGS-REQ, used to recover the
+    impersonated principal (its `client` field), which the Windows 4769
+    event does not carry. Correlated on attacker IP + event second.
+search: |-
+  index=windows EventCode=4769
+  | rex field=_raw "Transited Services:\s*(?<transited>[^\r\n]+)"
+  | eval attacker_ip=replace(Client_Address,"^::ffff:","")
+  | eval user=replace(Account_Name,"@.*","")
+  | eval req_acct=lower(replace(user,"\$$","")), tgt_acct=lower(replace(Service_Name,"\$$",""))
+  | where (transited="-" OR isnull(transited)) AND req_acct==tgt_acct
+  | rex field=_raw "Logon GUID:\s*(?<logon_guid>\S+)"
+  | lookup known_range_hosts hostname AS req_acct OUTPUT ip AS own_ip
+  | where isnotnull(own_ip) AND attacker_ip!=own_ip AND NOT attacker_ip IN ("::1","127.0.0.1","-","0.0.0.0")
+  | eval service=Service_Name
+  | eval tkey=attacker_ip.":".floor(_time)
+  | join type=left tkey [
+      search index=zeek sourcetype=zeek:kerberos request_type=TGS
+      | eval tkey=id_orig_h.":".floor(_time), imp=replace(client,"/.*","")
+      | stats values(imp) as impersonated by tkey ]
+  | join type=left attacker_ip user impersonated [
+      search index=windows EventCode=4769
+      | rex field=_raw "Transited Services:\s*(?<transited>[^\r\n]+)"
+      | where isnotnull(transited) AND transited!="-"
+      | eval attacker_ip=replace(Client_Address,"^::ffff:",""), user=replace(Account_Name,"@.*","")
+      | eval tkey=attacker_ip.":".floor(_time)
+      | join type=left tkey [
+          search index=zeek sourcetype=zeek:kerberos request_type=TGS
+          | eval tkey=id_orig_h.":".floor(_time), imp=replace(client,"/.*","")
+          | stats values(imp) as impersonated by tkey ]
+      | where isnotnull(impersonated)
+      | eval has_proxy=1
+      | stats values(has_proxy) as has_proxy by attacker_ip user impersonated ]
+  | where isnull(has_proxy) OR isnull(impersonated)
+  | stats values(attacker_ip) as attacker_ip values(user) as user values(service) as service by logon_guid impersonated
+  | table attacker_ip user service impersonated
+how_to_implement: >-
+  No infra fix needed -- 4769 from the DCs and Zeek's `kerberos.log` are
+  already forwarded. The S4U2Self signature is a self-reference request
+  (`Account_Name` and `Service_Name` resolve to the same machine account)
+  from a foreign IP. Self-reference alone is NOT sufficient: machine
+  accounts request tickets to themselves constantly as legitimate local
+  Kerberos activity (baseline: ca$ 42x/day, plus dc1$/dc2$/web$/etc.), but
+  always from the host's OWN IP (or loopback). The detection resolves the
+  requesting account's own IP via `known_range_hosts` and requires the
+  Client Address to differ from it, and excludes loopback/local addresses.
+  The impersonated principal comes from Zeek's `client` field -- Windows
+  does not log it in 4769. Suppression of the paired S4U2Proxy case is done
+  by correlating each S4U2Self against S4U2Proxy events (populated
+  `Transited Services`) on BOTH the requesting account (`user`) AND the
+  impersonated principal; a Self is dropped only when a Proxy with the same
+  (attacker_ip, user, impersonated) exists. Because that key includes the
+  impersonated user, a *different* S4U2Self in the same time window (a
+  different impersonated principal, or no matching proxy) still fires. When
+  the impersonated principal cannot be recovered (Zeek did not decode the
+  flow), the Self is not suppressed -- it fires alongside its proxy rather
+  than being silently dropped on an unverifiable match.
+known_false_positives: >-
+  Legitimate machine-account self-requests are excluded by the own-IP and
+  loopback filters (see how_to_implement). No legitimate protocol-transition
+  delegation happens in this range post-provisioning. **Field availability
+  note:** `impersonated` comes from Zeek, which decodes Kerberos cleanly
+  only for router-crossing traffic (the default attacker path); an S4U2Self
+  launched from the DC's own vnet may fire with a blank `impersonated`.
+verification:
+  date: '2026-09-29'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    Two live cases from john-kali using sql2$'s hash (from DCSync):
+    (1) full chain -- impacket-getST -spn cifs/dc1.cyberhawks.lab
+    -impersonate Administrator ... 'cyberhawks.lab/sql2$' (produces an
+    S4U2Self + S4U2Proxy for Administrator);
+    (2) standalone -- impacket-getST -self -impersonate rsmith ...
+    'cyberhawks.lab/sql2$' (produces an S4U2Self only, for rsmith).
+  result: >-
+    Correct on both, run in the same search window: the Administrator
+    S4U2Self was SUPPRESSED (its matching S4U2Proxy fires instead), while
+    the standalone rsmith S4U2Self FIRED (attacker_ip=192.168.1.11,
+    user=sql2$, service=SQL2$, impersonated=rsmith) -- confirming the
+    suppression keys on the impersonated principal, not merely a time
+    window, so a distinct S4U2Self in the same window is not missed. Legit
+    machine-account self-requests (from their own IP, and dc1$/dc2$ over
+    loopback) were correctly excluded.
+embed:
+  title: 'Delegation: S4U2Self'
+  additional_fields:
+    - user
+    - service
+    - impersonated
+references:
+  - 'detections/backlog.md, "AD persistence & privilege escalation" (constrained delegation abuse)'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '*/5 * * * *'
+  earliest: '-5m'
+  latest: now
+disabled: false
