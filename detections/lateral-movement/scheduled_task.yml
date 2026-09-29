@@ -27,8 +27,8 @@ search: |-
   | eval path=case(subj_type!=3,"local", src=="10.0.2.1" OR isnull(src),"admin", true(),"lateral")
   | where path="lateral"
   | bucket _time span=1m
-  | stats values(Task_Name) as task values(Subject_Account_Name) as user by _time src host_key
-  | rename src as Source_Network_Address, host_key as host
+  | stats values(Subject_Account_Name) as user by _time src host_key Task_Name
+  | rename src as Source_Network_Address, host_key as host, Task_Name as task
   | table Source_Network_Address host user task
 how_to_implement: >-
   No infra fix needed -- 4698/4624 were already forwarded and used by

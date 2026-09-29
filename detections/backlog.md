@@ -19,6 +19,8 @@ category table below.
 | Detection | Verified | YAML | Notes |
 |---|---|---|---|
 | Ping Sweep | 2026-09-27 | [reconnaissance/ping_sweep.yml](reconnaissance/ping_sweep.yml) | Live `nmap -sn` sweep from john-kali against all 7 range hosts, fired exactly once, no false positives over 1h |
+| Web Credential Read (Web.config.bak) | 2026-09-29 | [web-application/web_config_bak_leak.yml](web-application/web_config_bak_leak.yml) | IIS log on `web` (index=iis): any 200 to a config-backup path (`.bak`/`.old`/`.backup`/`.save`/`.orig`/bare `.config`/`~`). Live `curl Web.config.bak` from john-kali -> fired once (Source=c_ip, file). Needed the IIS HTTP.SYS boot-clock latch fixed first (was stamping log lines ~1h in the future); IIS log buffering also disabled (cyber-range) so lines flush immediately. Trailing 1-min window (`earliest=-2m latest=-1m`) to clear IIS delivery lag |
+| Certificate Request (HTTP) | 2026-09-29 | [adcs/certificate_request_http.yml](adcs/certificate_request_http.yml) | ESC8 web enrollment. Anchors on the CA 4887 (certificate issued) filtered to `DCOMorRPC=DCOM` (web enrollment's transport, vs RPC for ICPR), grouped **per Request ID**, inner-joined to an authenticated `POST /certsrv/certfnsh.asp` (200) in ca's IIS log to confirm HTTP and attach the attacker `c_ip`. Live `certipy-ad req -web` from john-kali, ids 5-12 across runs; each cert request surfaces as its own alert row (verified 4 concurrent). Doesn't collide with Certificate Request (RPC) (DCOM vs RPC, and no IIS leg there) |
 | Port Scan | 2026-09-27 | [reconnaissance/port_scan.yml](reconnaissance/port_scan.yml) | Live `nmap -p 445` sweep + `nmap -p 1-1000` single-host scan from john-kali, each fired exactly once; needed scoping to the range subnet + an NTP exclusion to kill false positives |
 | Relayed SMB or LDAP connection | 2026-09-27 | [ntlm/ntlm_authentication.yml](ntlm/ntlm_authentication.yml) | Named "NTLM Authentication" per the Alert Embed Planner — detects any anomalous-source NTLM auth, not just completed relays. Live Responder+ntlmrelayx relay (HTTP trigger -> LDAP on dc1) from the `test` box, plus a direct netexec SMB auth from john-kali; baseline NTLM frequency investigated first (zero in 3h+ of idle range operation) — needed an exclusion for this control host's own admin traffic (NAT'd to the gateway IP, 10.0.2.1) |
 | Attacker-added DNS record | 2026-09-27 | [ntlm/dns_record_creation.yml](ntlm/dns_record_creation.yml) | Named "DNS Record Creation". Required a bigger infra fix than expected: "Directory Service Changes" auditing alone doesn't produce any 5136/5137 events without an object-level SACL, and the only existing SACL (on the Default Domain Policy GPO, for ACL/DACL Modification) doesn't cascade — added a new SACL scoped to the DNS zone partition object. **This same root cause likely blocks RBCD Configuration, Shadow Credential Creation, and ScriptPath Attribute Tampering too** — each needs its own object SACL, don't assume any of them already work. Live `dnstool.py` record creation from john-kali, fired exactly once. **Documented gap:** the planner's `ip` field isn't obtainable — Windows logs the DNS record's actual value as opaque `<Binary>`; also no source IP exists on this event type at all, `user` is the only attribution available |
@@ -126,12 +128,10 @@ repo's CLAUDE.md, "IIS, SQL Server, and CA ingestion".)
 > misconfiguration. "Weak admin password" isn't its own row — see the note
 > below the table for why.
 
-| Detection | Log source | Status |
-|---|---|---|
-| `Web.config.bak` credential leak | App / IIS log — `Web.config` is deployed alongside a byte-identical `Web.config.bak` on `web` (left behind from a manual edit, per this range's design), and IIS's static-content handler was given a MIME-type mapping for `.bak` so it actually serves the file instead of 404ing. Alert on any HTTP GET of `Web.config.bak` (or any `.bak`/config-backup-looking path) returning 200 — nothing legitimate ever requests it. The file itself contains the real `svc-web` SQL Server connection string, plaintext password included. | **ready — IIS forwarding gap RESOLVED 2026-09-28; SPL not yet written.** The forwarding gap that blocked this is fixed in `defense-tooling` (see that repo's CLAUDE.md, "IIS, SQL Server, and CA ingestion"). Root cause was *not* the earlier `Restart-Service`-vs-`splunk.exe restart` watch theory (the watch does register on a normal start) — it was the sourcetype: `ms:iis:default` does fixed-column extraction, but this range's IIS sites log a customized W3C field set (and web ≠ ca), so every field mis-mapped (`host` became the s-port value, `cs_uri_stem` the s-ip, etc.). Fixed by switching to `ms:iis:auto` (header-driven `INDEXED_EXTRACTIONS=w3c`, deployed forwarder-side) plus `crcSalt=<SOURCE>`. Verified live 2026-09-28 after a remove+reinstall on `web`: `curl http://10.0.2.5/Web.config.bak` (200, real `svc-web` connection string) lands in `index=iis` with correct `host=WEB`, `cs_uri_stem=/Web.config.bak`, `c_ip`, `sc_status=200`. Detection SPL still to be written/verified: alert on any GET of a `.bak`/config-backup path returning 200 on `host=WEB`, scoped to source `c_ip` + the planner's fields. |
-Portal database read graduated 2026-09-27 — see the "Implemented" section
-above. Doesn't depend on the IIS gap above (it reads the SQL Server
-Extended Events stream instead), so it wasn't blocked by it.
+Both detections in this category have graduated — `Web.config.bak`
+credential leak (2026-09-29) and Portal database read (2026-09-27) — see
+the "Implemented" section above. Portal database read doesn't depend on the
+IIS layer (it reads the SQL Server Extended Events stream instead).
 
 **Why "weak admin password" isn't its own row:** it's a static property (the
 portal admin's password hash, `SHA1('abc123')`, is crackable once read),
@@ -142,12 +142,9 @@ be the row to add then; nothing to alert on for it yet.
 
 ## ADCS
 
-RPC/ICPR issuance graduated 2026-09-27 -- see the "Implemented" section
-above.
-
-| Detection | Log source | Status |
-|---|---|---|
-| HTTP web enrollment (ESC8) | IIS log on the CA (`host=ca`, `cs_uri_stem=/certsrv/*`) — the cert request itself is in the CA's Security log (4886-4889, already forwarded) regardless of transport; only the IIS log records that it arrived over HTTP web enrollment, with the requesting client IP and HTTP-auth user that distinguish an ESC8 relay from an ordinary RPC enrollment | ready — **IIS forwarding gap RESOLVED 2026-09-28; SPL not yet written.** Previously blocked by the same IIS gap as Web.config.bak (now fixed — see "Web application" above and `defense-tooling` CLAUDE.md). IIS logging confirmed live on `ca` 2026-09-28: `curl http://10.0.2.4/certsrv/` (401) lands in `index=iis` with correct `host=ca`, `cs_uri_stem=/certsrv/`, `c_ip`, `sc_status`. `ca`'s IIS logging exists specifically for this detection. SPL still to be written/verified against a real relayed/HTTP enrollment. |
+Both detections in this category have graduated — RPC/ICPR issuance
+(2026-09-27) and HTTP web enrollment / ESC8 (2026-09-29, "Certificate
+Request (HTTP)") — see the "Implemented" section above.
 
 ## Credential & ticket dumping
 

@@ -1,0 +1,111 @@
+name: Certificate Request (HTTP)
+id: adcs-certificate-request-http
+version: 1
+date: '2026-09-29'
+status: production
+category: adcs
+description: >-
+  A certificate enrollment submitted over AD CS HTTP Web Enrollment
+  (`/certsrv`) on the CA -- the ESC8 transport, where an attacker relays a
+  captured NTLM authentication to the CA's web-enrollment endpoint to obtain
+  a certificate as the relayed victim. The detection is keyed per issued
+  certificate: each CA 4887 (certificate issued) whose transport is `DCOM`
+  -- how AD CS Web Enrollment reaches the CA, versus the `RPC` of ordinary
+  ICPR enrollment -- becomes its own row (grouped by Request ID), so several
+  cert requests in quick succession each alert separately instead of merging
+  into one. Each is confirmed as HTTP (not a local DCOM enrollment) and given
+  its attacker IP by an inner join to an authenticated `POST
+  /certsrv/certfnsh.asp` (200) from the same user in the CA's IIS log, which
+  carries the requesting client IP (`c_ip`) and which no RPC/DCOM enrollment
+  ever produces. Complements Certificate Request (RPC), which covers the
+  `RPC` path and never touches IIS.
+data_source:
+  - >-
+    IIS W3C access log on `ca` (`index=iis`, host=ca, `cs_uri_stem`,
+    `cs_method`, `cs_username`, `c_ip`, `sc_status`) correlated with the CA
+    Security log 4887 (certificate issued -- `Requester`, `Request ID`,
+    `Certificate_Template`), already forwarded via the ca whitelist
+search: |-
+  index=windows host=ca EventCode=4887 DCOMorRPC=DCOM
+  | rex field=_raw "Requester:\s+(?<ruser>[^\r\n]+)"
+  | rex field=_raw "Request ID:\s+(?<id>\S+)"
+  | eval user=lower(mvindex(split(trim(ruser),"\\"),-1))
+  | join type=inner max=0 user [
+      search index=iis host=ca cs_uri_stem="/certsrv/certfnsh.asp" cs_method=POST sc_status=200 earliest=-10m
+      | eval user=lower(mvindex(split(cs_username,"\\"),-1))
+      | stats latest(c_ip) as Source_Network_Address by user
+    ]
+  | stats values(Source_Network_Address) as Source_Network_Address values(user) as user values(Certificate_Template) as template by id
+  | table Source_Network_Address user template id
+how_to_implement: >-
+  Requires IIS log forwarding from `ca` (index=iis, ms:iis:auto -- see
+  defense-tooling's splunk_forwarder_windows role; ca's IIS logging exists
+  specifically for this detection) and 4886/4887 in ca's Security whitelist
+  (already present). Action-based: it keys on the certificate-issued event
+  and its transport plus the web-enrollment object served (an authenticated
+  POST to /certsrv/certfnsh.asp returning 200), never on a client tool or
+  user-agent -- certipy's `-web`, an ntlmrelayx relay to /certsrv, or a
+  browser all produce identical telemetry. It anchors on the CA's own 4887
+  filtered to `DCOMorRPC=DCOM` (Web Enrollment reaches the CA over DCOM;
+  ordinary ICPR is RPC, covered by Certificate Request (RPC)) and groups by
+  Request ID so each issued cert is one alert, then inner-joins the CA IIS
+  log by enrolling user (IIS cs_username == 4887 Requester) both to confirm
+  the request actually arrived over HTTP (a local/non-web DCOM enrollment
+  would have no /certsrv POST) and to attach the attacker's `c_ip` (4887
+  carries no source IP). `join max=0` keeps every matching enrollment rather
+  than one. Machine accounts are deliberately NOT excluded (ESC8 commonly
+  relays a machine account's NTLM). Residual imprecision: if two different
+  source IPs enrolled as the SAME user within the join window, each id would
+  list both IPs -- not a miss, and not expected in this range. NOTE: IIS stamps request time from a HTTP.SYS
+  wall-clock cache latched at boot -- the member-server ForceTimeResyncOnBoot
+  task (cyber-range network_prereqs) keeps ca's boot clock correct so these
+  log lines aren't future-dated out of the scheduled window.
+known_false_positives: >-
+  None expected in this range: AD CS web enrollment is not used
+  legitimately here (it exists for this detection), so any authenticated
+  /certsrv/certfnsh.asp POST is an actual web enrollment worth surfacing. In
+  an environment where web enrollment is a sanctioned path, this would fire
+  on every legitimate web enrollment and should be scoped to unexpected
+  source IPs or off-template requests. Because the anchor is the per-id 4887
+  filtered to DCOM and confirmed by a same-user /certsrv POST, an ordinary
+  RPC enrollment (RPC transport, no IIS) is excluded and does not collide
+  with Certificate Request (RPC).
+verification:
+  date: '2026-09-29'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    certipy-ad req -u dsmith@cyberhawks.lab -p Summer2026 -ca cyberhawks-CA
+    -template ESC1Template -web -http-scheme http -http-port 80
+    -no-channel-binding -target ca.cyberhawks.lab -upn
+    administrator@cyberhawks.lab -- a real HTTP Web Enrollment (ESC8
+    transport) against the range's genuine ESC1 template misconfiguration.
+    Ran four web enrollments (request IDs 5-8). Each surfaced as its own row
+    keyed by id -- e.g. Source_Network_Address=192.168.1.11, user=dsmith,
+    template=ESC1Template, id in {6,7,8} all returned together (confirming
+    subsequent requests don't collapse into one alert), each 4887 DCOM with a
+    matching POST /certsrv/certfnsh.asp (200, cs_username=CYBERHAWKS\DSMITH).
+    The RPC detection did not fire on any (DCOM transport, and it has no IIS
+    leg). Verified in the real trailing scheduled window as well as ad hoc.
+embed:
+  title: Certificate Request (HTTP)
+  additional_fields:
+    - user
+    - template
+    - id
+references:
+  - 'detections/backlog.md, "ADCS" (backlog row: "HTTP web enrollment (ESC8)")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  # Trailing 1-minute window, evaluated every minute. `latest=-1m` (not `now`)
+  # ends the window a minute in the past, which gives the IIS log line time to
+  # flush + forward + index (measured ~38s end-to-end with HTTP.SYS buffering
+  # disabled -- see cyber-range iis_log_buffering) so nothing is clipped at the
+  # window's trailing edge; the windows are contiguous and non-overlapping, so
+  # each request is evaluated exactly once. Combined with the per-request-ID
+  # grouping above, several cert requests in quick succession each surface as
+  # their own row/alert rather than collapsing into one 5-minute bucket.
+  cron: '* * * * *'
+  earliest: '-2m'
+  latest: '-1m'
+disabled: false

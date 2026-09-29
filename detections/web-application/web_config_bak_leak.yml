@@ -66,7 +66,14 @@ references:
   - 'detections/backlog.md, "Web application" (backlog row: "Web.config.bak credential leak")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
 schedule:
+  # Trailing 1-minute window, every minute. `latest=-1m` (not `now`) ends the
+  # window a minute in the past so the IIS log line has time to flush + forward
+  # + index (~38s end-to-end with HTTP.SYS buffering disabled -- see
+  # cyber-range iis_log_buffering) before the window that contains it is
+  # evaluated; the windows are contiguous and non-overlapping, so each hit is
+  # evaluated exactly once and successive reads in different minutes alert
+  # separately rather than merging into one large bucket.
   cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
+  earliest: '-2m'
+  latest: '-1m'
 disabled: false

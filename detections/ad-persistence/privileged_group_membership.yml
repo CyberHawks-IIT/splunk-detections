@@ -26,8 +26,7 @@ search: |-
   | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
   | eval Source_Network_Address=coalesce(logon_src, host_ip)
   | bucket _time span=1m
-  | stats values(type) as type values(target) as target values(Source_Network_Address) as Source_Network_Address by _time Subject_Account_Name
-  | rename Subject_Account_Name as user
+  | stats values(Subject_Account_Name) as user values(Source_Network_Address) as Source_Network_Address by _time Group_Name target type
   | table Source_Network_Address user type target
 how_to_implement: >-
   Required a real infra fix: 4728/4732/4756 (the "add member" events) were

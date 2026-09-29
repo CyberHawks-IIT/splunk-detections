@@ -28,9 +28,9 @@ search: |-
   | where path="local"
   | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
   | bucket _time span=1m
-  | stats values(Task_Name) as task values(Subject_Account_Name) as user values(host_ip) as host_ip by _time host_key
+  | stats values(Subject_Account_Name) as user values(host_ip) as host_ip by _time host_key Task_Name
   | eval Source_Network_Address=host_ip
-  | rename host_key as host
+  | rename host_key as host, Task_Name as task
   | table Source_Network_Address host user task
 how_to_implement: >-
   No infra fix needed -- shares its data source with Lateral Movement:

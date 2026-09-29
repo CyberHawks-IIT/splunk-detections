@@ -27,7 +27,8 @@ search: |-
       | stats values(id_orig_h) as Source_Network_Address by host
     ]
   | bucket _time span=1m
-  | stats values(Source_Network_Address) as Source_Network_Address values(Requester) as user values(Certificate_Template) as template values(Request_ID) as id by _time host
+  | stats values(Source_Network_Address) as Source_Network_Address values(Requester) as user values(Certificate_Template) as template by _time host Request_ID
+  | rename Request_ID as id
   | table Source_Network_Address host user template id
 how_to_implement: >-
   No infra fix needed -- 4886/4887 (Certification Services auditing) and

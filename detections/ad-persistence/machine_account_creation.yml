@@ -22,8 +22,8 @@ search: |-
   | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
   | eval Source_Network_Address=coalesce(logon_src, host_ip)
   | bucket _time span=1m
-  | stats values(SAM_Account_Name) as account values(Source_Network_Address) as Source_Network_Address by _time Subject_Account_Name
-  | rename Subject_Account_Name as user
+  | stats values(Subject_Account_Name) as user values(Source_Network_Address) as Source_Network_Address by _time SAM_Account_Name
+  | rename SAM_Account_Name as account
   | table Source_Network_Address user account
 how_to_implement: >-
   No infra fix needed -- 4741 auditing (Computer Account Management,
