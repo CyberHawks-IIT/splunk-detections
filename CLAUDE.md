@@ -118,6 +118,13 @@ scoped to source IP + the planner's fields) came out of this same pass.
   event happens to carry. Keep the search's field list and the planner's
   field list in sync, the same way `defense-tooling`'s
   `splunk_uf_monitor_files` and this file's Zeek-logs table stay in sync.
+  **The output-column names are standardized (2026-09-29):** the attacker
+  source IP (the Attacker-lookup key) is always the first column and named
+  **`attacker_ip`**; the targeted host is always **`host`**. Every `| table`
+  is exactly `attacker_ip` + the planner's additional fields, in the same
+  order as `embed.additional_fields`. (The one exception is Pass-the-Ticket,
+  whose ticket-reuse semantics report `origin`/`destination` rather than a
+  single attacker IP.)
 - **Zeek fields in SPL use underscores, not the dotted Zeek/CIM
   convention.** `id.orig_h`, `id.resp_h`, `id.resp_p`, etc. as written in
   this file's prose (and in Zeek's own docs) are `id_orig_h`, `id_resp_h`,
@@ -230,6 +237,44 @@ confirmed live on dc1 (Server 2016):
 - **Zeek `_time` is not the connection time.** It's near index time,
   minute-rounded; the real start is the `ts` field. Any SPL that needs
   sub-minute Zeek timing must use `ts`.
+
+## S4U delegation: the impersonated user is only in Zeek, not 4769 (2026-09-29)
+
+Added `Delegation: S4U2Self` and `Delegation: S4U2Proxy` (the range configures
+`sql2$` with protocol transition / T2A4D → `cifs/dc1`). Findings, all
+confirmed live from john-kali:
+
+- **Windows 4769 does NOT carry the impersonated principal.** In both the
+  S4U2Self and S4U2Proxy 4769 events, `Account Name` is the delegating
+  *service* (`sql2$`), never the impersonated user; the 4768 TGT is also for
+  `sql2$`. The impersonated user ("who the ticket is for") rides in
+  PA-FOR-USER and Server 2016 simply doesn't log it. This matches every
+  public rule (Sigma/SpecterOps/Elastic are all 4769-only and note they
+  can't recover it). **Zeek `kerberos.log` DOES surface it** as the TGS
+  request's `client` field (plus the full SPN in `service`, e.g.
+  `cifs/dc1.cyberhawks.lab` vs Windows' bare `DC1$`). So both detections use
+  Windows 4769 as the reliable trigger and join Zeek on attacker IP + event
+  second for `impersonated`/full-SPN. Zeek only decodes cleanly for
+  router-crossing traffic (the default john-kali path), so `impersonated` is
+  best-effort — the detection still fires on the 4769 signal when Zeek misses.
+- **S4U2Proxy signal:** 4769 with `Transited Services` populated (blank on
+  every ordinary TGS; zero in 24h baseline). `Transited Services` is not
+  auto-extracted — `rex` it from `_raw` (the value is on the line *after* the
+  label, so `\s*` must cross the newline).
+- **S4U2Self signal:** 4769 self-reference (requesting account == target
+  service). This alone is noisy — machine accounts self-request constantly as
+  legit local Kerberos (baseline `ca$` 42×/day, DCs over `::1`) — but always
+  from the host's **own IP or loopback**, so the real signal is a
+  self-reference from a *foreign* IP (own IP resolved via `known_range_hosts`,
+  loopback excluded).
+- **Pairing/dedup keys on identity, not time.** When a Self and Proxy come
+  from the same operation they share the same impersonated principal and
+  requesting account (and a Windows Logon GUID). S4U2Self is suppressed only
+  when an S4U2Proxy exists for the same `(attacker_ip, requesting user,
+  impersonated principal)` — so a *different* S4U2Self in the same window
+  (different impersonated user, or `getST -self` with no proxy) still fires.
+  When `impersonated` can't be recovered (Zeek miss), the Self is not
+  suppressed rather than dropped on an unverifiable match.
 
 ## Status
 
