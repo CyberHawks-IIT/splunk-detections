@@ -6,6 +6,7 @@ contentctl builds individual detection YAML files into a deployable app --
 see splunk-detections CLAUDE.md. Run this after adding/editing any
 detection YAML; do not hand-edit savedsearches.conf, it's generated.
 """
+import argparse
 import glob
 import os
 import sys
@@ -29,11 +30,14 @@ HEADER = """\
 # still TBD for most entries.
 #
 # Scheduled (disabled = false in the YAML -> disabled = 0 here) so each one
-# is visible under Activity > Triggered Alerts in Splunk web when it fires
-# -- but no alert *action* (email/webhook/script) is configured on any of
-# them, since Discord webhook alerting isn't wired up yet (see CLAUDE.md's
-# "Detection design pass" section). Nothing here reaches Discord or
-# anywhere external until that's built.
+# is visible under Activity > Triggered Alerts in Splunk web when it fires.
+#
+# Discord alerting: build with --discord to also wire each search to the
+# `discord_alert` custom alert action (defense-tooling installs that action
+# and the webhook URL when a Discord webhook is configured). Without --discord
+# (the default, and the committed app/) no alert action is configured, so this
+# app is inert as far as Discord goes -- nothing reaches Discord until you both
+# build with --discord AND deploy defense-tooling's discord_alert action.
 """
 
 
@@ -59,12 +63,12 @@ def render_search(search_text):
     return "\\\n".join(lines)
 
 
-def render_stanza(d):
+def render_stanza(d, discord=False):
     search = render_search(d["search"])
     description = " ".join(d["description"].split())
     schedule = d["schedule"]
     disabled = "1" if d.get("disabled", True) else "0"
-    return (
+    stanza = (
         f"[{d['name']}]\n"
         f"search = {search}\n"
         f"description = {description}\n"
@@ -78,13 +82,34 @@ def render_stanza(d):
         f"alert_comparator = greater than\n"
         f"alert_threshold = 0\n"
     )
+    if discord:
+        # The stanza name is the embed title (this repo's convention: the
+        # Splunk alert name IS the Discord embed title). The action renders the
+        # result row's columns as embed fields; each search's `| table` is
+        # already exactly attacker_ip + the planner's additional_fields, so we
+        # pass that field list to fix ordering and skip any stray columns.
+        embed = d.get("embed", {})
+        fields = embed.get("additional_fields", []) or []
+        stanza += "action.discord_alert = 1\n"
+        if fields:
+            stanza += f"action.discord_alert.param.fields = {','.join(fields)}\n"
+    return stanza
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--discord",
+        action="store_true",
+        help="wire each search to the discord_alert custom alert action "
+        "(defense-tooling installs that action + the webhook)",
+    )
+    args = parser.parse_args()
+
     detections = load_detections()
     if not detections:
         sys.exit("No production detections found under detections/**/*.yml")
-    stanzas = [render_stanza(d) for d in detections]
+    stanzas = [render_stanza(d, discord=args.discord) for d in detections]
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     with open(OUTPUT_PATH, "w", encoding="utf-8", newline="\n") as f:
         f.write(HEADER)
