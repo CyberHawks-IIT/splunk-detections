@@ -1,27 +1,41 @@
 name: Forced Authentication
 id: ntlm-forced-authentication
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-29'
 status: production
 category: ntlm
 description: >-
-  A domain controller initiating an outbound SMB connection (445/139) to a
-  host that isn't the other DC -- the network-visible *consequence* of a
-  coercion attack (PetitPotam/DFSCoerce/ShadowCoerce/PrinterBug/CheeseOunce:
-  any technique that abuses an RPC call to force a target to authenticate
-  outbound to an attacker-chosen listener). A DC is normally an SMB
-  *server* (things connect to it), never a client of an arbitrary host's
-  SMB service, so this happening at all is the signal -- detected by its
-  effect rather than the triggering RPC call itself, which turned out to
-  have no working telemetry source (see how_to_implement).
+  A coercion RPC call -- a remote invocation of one of the coercion
+  interfaces (MS-EFSR/PetitPotam, MS-DFSNM/DFSCoerce, MS-RPRN/PrinterBug,
+  MS-FSRVP/ShadowCoerce) against any Windows host -- captured by RPC
+  Firewall (zeronetworks), which is injected into the RPC server processes
+  (lsass/spoolsv/dfssvc/vss) on every range host and audits each such call
+  to the RPCFW event channel with the caller's source IP, the interface
+  UUID, and the authenticated subject. This detects the coercion at the RPC
+  layer (encryption-proof and tool-agnostic), reporting the attacker's own
+  source IP (`Source_Network_Address`), the `type` of coercion, the target
+  `host`, and the coercing `user`. A secondary Zeek conn.log leg keeps the
+  original effect-based signal (a DC making an outbound SMB connection to a
+  non-DC) as a backstop for hosts without RPC Firewall or interfaces not in
+  the audited set.
 data_source:
-  - Zeek conn.log, DC as id_orig_h, destination port 445 or 139, excluding DC-to-DC
+  - 'RPC Firewall (Application/RPCFW) EventID 3 on the coercion interface UUIDs -- caller IP, InterfaceUuid, subject'
+  - 'Secondary: Zeek conn.log, DC as id_orig_h, destination port 445 or 139, excluding DC-to-DC (coercion effect)'
 search: |-
-  index=zeek sourcetype=zeek:conn (id_orig_h=10.0.2.2 OR id_orig_h=10.0.2.3) (id_resp_p=445 OR id_resp_p=139) NOT (id_resp_h=10.0.2.2 OR id_resp_h=10.0.2.3)
+  index=windows source="WinEventLog:RPCFW" EventCode=3
+  | rex field=_raw "Client Network Address:\s+(?<Source_Network_Address>[0-9a-fA-F.:]+)"
+  | rex field=_raw "InterfaceUuid:\s+(?<uuid>[0-9a-fA-F-]+)"
+  | rex field=_raw "Security ID:\s+(?<user>[^\r\n]+)"
+  | rex field=ComputerName "(?<host>[^.]+)"
+  | eval type=case(uuid=="c681d488-d850-11d0-8c52-00c04fd90f7e" OR uuid=="df1941c5-fe89-4e79-bf10-463657acf44d","PetitPotam (MS-EFSR)", uuid=="4fc742e0-4a10-11cf-8273-00aa004ae673","DFSCoerce (MS-DFSNM)", uuid=="12345678-1234-abcd-ef00-0123456789ab","PrinterBug (MS-RPRN)", uuid=="a8e0653c-2744-4389-a61d-7373df8b2292","ShadowCoerce (MS-FSRVP)", true(),"coercion RPC ("+uuid+")")
+  | append [
+      search index=zeek sourcetype=zeek:conn (id_orig_h=10.0.2.2 OR id_orig_h=10.0.2.3) (id_resp_p=445 OR id_resp_p=139) NOT (id_resp_h=10.0.2.2 OR id_resp_h=10.0.2.3)
+      | lookup known_range_hosts ip AS id_orig_h OUTPUT hostname AS host
+      | eval Source_Network_Address=id_resp_h, type="outbound SMB (coercion effect)", user=null()
+    ]
   | bucket _time span=1m
-  | stats values(id_resp_p) as ports by _time id_orig_h id_resp_h
-  | rename id_resp_h as destination, id_orig_h as host
-  | table destination host
+  | stats values(type) as type values(user) as user by _time Source_Network_Address host
+  | table Source_Network_Address host type user
 how_to_implement: >-
   Requires defense-tooling's Zeek sensor forwarding conn.log (already
   forwarded). No infra fix needed for this final approach -- but getting
@@ -102,7 +116,27 @@ known_false_positives: >-
   traditional "source of the malicious activity", since here the DC
   itself is the coerced victim, not the attacker.
 verification:
-  date: '2026-09-27'
+  date: '2026-09-29'
+  reworked_2026_09_29: >-
+    REWORKED onto RPC Firewall (zeronetworks) per the review pass, so this
+    detects the coercion RPC call directly (encryption-proof, tool-agnostic,
+    on every Windows host -- not just the DC-outbound effect). Deployed RPC
+    Firewall v2.2.5 to the range hosts (rpcFireWall.dll injected into
+    lsass/spoolsv/dfssvc/svchost), configured to audit ONLY the four
+    coercion interface UUIDs (MS-EFSR c681d488.. / df1941c5.., MS-DFSNM
+    4fc742e0.., MS-RPRN 12345678..-6789ab, MS-FSRVP a8e0653c..) so the RPCFW
+    channel stays low-volume; added the RPCFW channel to defense-tooling's
+    Windows forwarder whitelist and the deploy to cyber-range's
+    detection_logging role. Live-verified 2026-09-29: `petitpotam -u user -p
+    password -d cyberhawks.lab 192.168.1.11 10.0.2.5` (EFSR coercion of web)
+    produced RPCFW EventID 3 -- Client Network Address 192.168.1.11,
+    InterfaceUuid c681d488.. (mapped to type="PetitPotam (MS-EFSR)"),
+    Subject CYBERHAWKS\user -- which the detection surfaced as
+    Source_Network_Address=192.168.1.11, host=WEB, type="PetitPotam
+    (MS-EFSR)", user=CYBERHAWKS\user. The original conn.log effect leg is
+    kept as a secondary backstop (below). NOTE: live-deployed to dc1, dc2,
+    web, sql1, workstation; ca and sql2 (LAPS) get RPC Firewall via the
+    detection_logging role on next provision.
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: john-kali (VM 611)
   technique:
@@ -125,6 +159,8 @@ embed:
   title: Forced Authentication
   additional_fields:
     - host
+    - type
+    - user
 references:
   - 'detections/backlog.md, "NTLM relay & coercion" (backlog row: "Coercion trigger")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
