@@ -1,7 +1,7 @@
 name: LDAP Query
 id: enumeration-ldap-query
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-29'
 status: production
 category: enumeration
 description: >-
@@ -20,10 +20,10 @@ data_source:
     Windows Events 1644 (Field Engineering, Directory Service log) on the
     same DC for the query content and bind account
 search: |-
-  index=zeek sourcetype=zeek:conn (id_resp_p=389 OR id_resp_p=636)
+  index=zeek sourcetype=zeek:conn (id_resp_p=389 OR id_resp_p=636 OR id_resp_p=9389)
   | lookup known_range_hosts ip AS id_orig_h OUTPUT hostname
   | where isnull(hostname)
-  | eval protocol=if(id_resp_p=389, "ldap", "ldaps")
+  | eval protocol=case(id_resp_p=389, "ldap", id_resp_p=636, "ldaps", id_resp_p=9389, "adws")
   | rename id_orig_h as Source_Network_Address, id_resp_h as host, id_orig_p as client_port
   | join type=left client_port [
       search index=windows LogName="Directory Service" EventCode=1644
@@ -66,14 +66,17 @@ how_to_implement: >-
   `query` empty for the `ldaps` protocol value; `Source_Network_Address`/
   `host`/`protocol` are the only fields available for encrypted LDAP,
   exactly as the original backlog design anticipated ("Zeek can't decrypt
-  the wire traffic"). ADWS (TCP/9389) is **not yet implemented in this
-  alert's SPL** -- live-testing it needs a Windows client with the
-  ActiveDirectory PowerShell module reaching the DC on 9389 from a
-  non-domain-joined IP, which wasn't readily available this session (the
-  attacker boxes are Linux); left for a future session rather than shipping
-  the ADWS branch unverified, per this project's own rule against
-  unverified SPL. The backlog's own note already flagged ADWS's client-IP
-  correlation as uncertain even before this gap.
+  the wire traffic"). **ADWS (TCP/9389) branch implemented + verified
+  2026-09-29** from john-windows (a Windows attacker box, 192.168.1.10)
+  running `Get-ADUser -Server 10.0.2.2 -Credential cyberhawks\user` -- the
+  AD PowerShell cmdlets go over ADWS/9389. Added 9389 to the conn.log leg
+  with `protocol=adws`. Confirmed live: Zeek captures the 9389 flow
+  (192.168.1.10 -> 10.0.2.2), giving Attacker IP + host. As anticipated,
+  `user`/`query` are empty for `adws` exactly like `ldaps`: ADWS proxies the
+  query to LOCAL LDAP on the DC, so no 1644 event carrying the remote
+  client's port is produced, and the client-port join cannot match. `adws`
+  and `ldaps` both yield Attacker IP + host + protocol only; plain `ldap`
+  (389) additionally recovers user/query from 1644.
 known_false_positives: >-
   `known_range_hosts` excludes every domain-joined host's static IP, so
   ordinary intra-domain LDAP traffic (workstation group policy refresh,
