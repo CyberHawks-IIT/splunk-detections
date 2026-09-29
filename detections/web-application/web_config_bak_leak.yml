@@ -1,0 +1,72 @@
+name: Web Credential Read (Web.config.bak)
+id: web-application-web-config-bak-leak
+version: 1
+date: '2026-09-29'
+status: production
+category: web-application
+description: >-
+  A successful HTTP GET of a configuration-backup file (e.g.
+  `Web.config.bak`) on the `web` portal host. The live `Web.config` is
+  deployed alongside a byte-identical `Web.config.bak`, and IIS was given a
+  static MIME mapping for `.bak` so the backup is served as plain text
+  instead of 404ing -- so anyone who requests it gets the real `svc-web`
+  SQL Server connection string (username and plaintext password) back over
+  HTTP. Nothing legitimate ever requests a `.bak`/config-backup path, so any
+  200 on one is the credential leak being exploited. The attacker IP is the
+  requesting client (`c_ip`); `file` is the path served.
+data_source:
+  - >-
+    IIS W3C access log on `web` (`index=iis`, sourcetype `ms:iis:auto`,
+    host=WEB), fields `cs_uri_stem`, `sc_status`, `c_ip`
+search: |-
+  index=iis host=WEB sc_status=200 (cs_uri_stem="*.bak" OR cs_uri_stem="*.old" OR cs_uri_stem="*.backup" OR cs_uri_stem="*.save" OR cs_uri_stem="*.orig" OR cs_uri_stem="*.config" OR cs_uri_stem="*~")
+  | rename c_ip as Source_Network_Address, cs_uri_stem as file
+  | stats values(file) as file by Source_Network_Address
+  | table Source_Network_Address file
+how_to_implement: >-
+  Requires IIS log forwarding from `web` -- landed in `index=iis` via the
+  `ms:iis:auto` sourcetype with forwarder-side `INDEXED_EXTRACTIONS=w3c`
+  (see defense-tooling's `splunk_forwarder_windows` role; the earlier
+  `ms:iis:default` mis-mapped every field). The match is action-based: it
+  keys on the object served (a config-backup path) and the 200 result, never
+  on a user-agent or client tool. The extension set covers the common
+  config-backup shapes an attacker probes (`.bak`, `.old`, `.backup`,
+  `.save`, `.orig`, bare `.config`, editor `~` files); add more here if the
+  range ever ships a differently-named backup. NOTE: IIS logs request time
+  from a HTTP.SYS-cached wall clock latched at boot -- if `web` cold-boots
+  with a skewed clock the log timestamps land in the future and this
+  scheduled search's `latest=now` window misses them; the member-server
+  `ForceTimeResyncOnBoot` task (cyber-range `network_prereqs`) keeps the boot
+  clock correct so that does not happen.
+known_false_positives: >-
+  None expected -- no legitimate client requests a `.bak`/`.old`/config-backup
+  path, and a normal page load (`/Default.aspx`, static assets) never matches
+  the extension filter. If a future deployment legitimately serves a `.config`
+  asset (unusual), scope the bare-`.config` clause out. Verified no benign
+  hits over the baseline IIS traffic on `web`.
+verification:
+  date: '2026-09-29'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    curl http://10.0.2.5/Web.config.bak -- the range's real MIME-mapped
+    backup file, which returns 200 with the plaintext `svc-web` connection
+    string.
+  result: >-
+    Fired once with Source_Network_Address=192.168.1.11, file=/Web.config.bak.
+    A normal 200 page load does not match (extension filter); a `.bak` request
+    that 404s does not match (sc_status=200 required). Verified _time is the
+    real request time after fixing the HTTP.SYS boot-clock latch on web (see
+    how_to_implement).
+embed:
+  title: Web Credential Read (Web.config.bak)
+  additional_fields:
+    - file
+references:
+  - 'detections/backlog.md, "Web application" (backlog row: "Web.config.bak credential leak")'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+schedule:
+  cron: '* * * * *'
+  earliest: '-1m'
+  latest: now
+disabled: false
