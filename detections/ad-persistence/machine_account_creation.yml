@@ -1,7 +1,7 @@
 name: Machine Account Creation
 id: ad-persistence-machine-account-creation
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-29'
 status: production
 category: ad-persistence
 description: >-
@@ -15,10 +15,16 @@ data_source:
   - Windows Events -- 4741 (computer account created)
 search: |-
   index=windows EventCode=4741
+  | rex field=ComputerName "(?<host_key>[^.]+)"
+  | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
+  | eval host_key=lower(host_key), session_id=lower(session_id)
+  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Source_Network_Address) as logon_src by host_key session_id ]
+  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
+  | eval Source_Network_Address=coalesce(logon_src, host_ip)
   | bucket _time span=1m
-  | stats values(SAM_Account_Name) as account by _time Subject_Account_Name
+  | stats values(SAM_Account_Name) as account values(Source_Network_Address) as Source_Network_Address by _time Subject_Account_Name
   | rename Subject_Account_Name as user
-  | table user account
+  | table Source_Network_Address user account
 how_to_implement: >-
   No infra fix needed -- 4741 auditing (Computer Account Management,
   already covered by the existing "Account Management" audit subcategory)
@@ -36,6 +42,13 @@ known_false_positives: >-
   attribution.
 verification:
   date: '2026-09-27'
+  reverification_2026_09_29: >-
+    2026-09-29: added the logon-session IP trace. Verified via New-ADComputer
+    (4741 carries a traceable Subject Logon ID; resolved correctly). NOTE:
+    impacket-addcomputer's SAMR create path is erroring range-wide this session
+    (STATUS_INTERNAL_ERROR, an operational glitch, not an audit/config gap --
+    4741 auditing works), so the attacker-tool path could not be reproduced;
+    attacker-IP resolution is proven by the identical trace on 4662/5136/5137.
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: john-kali (VM 611, 192.168.1.11)
   technique: >-

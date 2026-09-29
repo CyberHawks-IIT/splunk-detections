@@ -1,7 +1,7 @@
 name: DPAPI Dump
 id: dpapi-dump
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-29'
 status: production
 category: credential-dumping
 description: >-
@@ -14,10 +14,16 @@ data_source:
   - 'Windows Events -- 4663, Object Name under a Protect or Credentials folder'
 search: |-
   index=windows EventCode=4663 (Object_Name="*\Protect\*" OR Object_Name="*\Protect" OR Object_Name="*\Credentials\*" OR Object_Name="*\Credentials") NOT Process_Name="*lsass.exe"
+  | rex field=ComputerName "(?<host_key>[^.]+)"
+  | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
+  | eval host_key=lower(host_key), session_id=lower(session_id)
+  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Source_Network_Address) as logon_src by host_key session_id ]
+  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
+  | eval Source_Network_Address=coalesce(logon_src, host_ip)
   | bucket _time span=10s
-  | stats count values(Object_Name) as files by _time ComputerName Account_Name
+  | stats count values(Object_Name) as files values(Source_Network_Address) as Source_Network_Address by _time ComputerName Account_Name
   | rename ComputerName as host, Account_Name as user
-  | table host user files
+  | table Source_Network_Address host user files
 how_to_implement: >-
   Requires the file-system SACL on the Protect and Credentials folders
   (cyber-range's detection_logging role) and the "File System" audit
@@ -27,6 +33,9 @@ known_false_positives: >-
   None found over 4h of normal range background traffic.
 verification:
   date: '2026-09-27'
+  reverification_2026_09_29: >-
+    2026-09-29: added the logon-session IP trace. Re-fired (masterkey +
+    credential file reads on workstation); resolves the acting session's source.
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: this control host, Administrator over WinRM (Defender real-time monitoring disabled first)
   technique: >-

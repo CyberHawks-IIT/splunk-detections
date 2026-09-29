@@ -1,7 +1,7 @@
 name: Domain Replication (DCSync)
 id: credential-dumping-dcsync
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-29'
 status: production
 category: credential-dumping
 description: >-
@@ -23,9 +23,15 @@ search: |-
   | rex field=_raw "Subject\s*:\s*\r?\n\tSecurity ID:\t*\S+\r?\n\tAccount Name:\t*(?<user>\S+)"
   | rex field=ComputerName "(?<host>[^.]+)"
   | where NOT match(user, "\$$")
+  | rex field=ComputerName "(?<host_key>[^.]+)"
+  | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
+  | eval host_key=lower(host_key), session_id=lower(session_id)
+  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Source_Network_Address) as logon_src by host_key session_id ]
+  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
+  | eval Source_Network_Address=coalesce(logon_src, host_ip)
   | bucket _time span=1m
-  | stats count by _time user host
-  | table user host
+  | stats values(Source_Network_Address) as Source_Network_Address by _time user host
+  | table Source_Network_Address user host
 how_to_implement: >-
   No forwarder/audit-policy fix needed this time -- "Directory Service
   Access" auditing was already on and 4662 already forwarded; the audit ACE
@@ -60,6 +66,15 @@ known_false_positives: >-
   Creation/Privileged Group Membership.
 verification:
   date: '2026-09-27'
+  reverification_2026_09_29: >-
+    2026-09-29: added the logon-session->4624 Source Network Address trace. Live
+    re-fire (impacket-secretsdump -just-dc-user from john-kali 192.168.1.11 as
+    user) now returns Attacker IP 192.168.1.11 instead of defaulting to the DC.
+    FOUND+FIXED an infra gap first: the domain-root audit ACE for DS-
+    Replication-Get-Changes[-All] (what makes a non-DC principal's 4662 fire)
+    was missing from the current range -- the original verification relied on a
+    live-only ACE lost on a DC revert. Added it to cyber-range detection_logging
+    (configure_sacls_dc.ps1) and applied live to dc1.
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: john-kali (VM 611, 192.168.1.11)
   technique: >-

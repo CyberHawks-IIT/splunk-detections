@@ -1,7 +1,7 @@
 name: WMI Event Subscription Creation
 id: host-persistence-wmi-event-subscription
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-29'
 status: production
 category: host-persistence
 description: >-
@@ -18,7 +18,9 @@ search: |-
   | rex field=_raw "Data Name='Name'>\s*\"(?<obj_name>[^\"]+)\""
   | bucket _time span=1m
   | stats values(User) as user values(eval(if(EventID=19,obj_name,null()))) as producer values(eval(if(EventID=20,obj_name,null()))) as consumer values(eval(if(EventID=21,"yes",null()))) as binding by _time host
-  | table host user producer consumer binding
+  | eval host_key=lower(host)
+  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS Source_Network_Address
+  | table Source_Network_Address host user producer consumer binding
 how_to_implement: >-
   No infra fix needed -- Sysmon's `WmiEvents` rule group in
   `sysmon_config.xml` already has an empty `onmatch="exclude"` filter
@@ -36,6 +38,11 @@ known_false_positives: >-
   range.
 verification:
   date: '2026-09-27'
+  reverification_2026_09_29: >-
+    2026-09-29: added an Attacker-IP field via known_range_hosts host-IP
+    fallback (Sysmon 19/20/21 carry no logon ID, so the session trace is not
+    possible). Live re-fire on workstation returns
+    Source_Network_Address=10.0.2.8 (its own IP).
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: WinRM from the control host, as domain admin (simulating an attacker who has already achieved local admin)
   technique: >-

@@ -1,7 +1,7 @@
 name: DNS Record Creation
 id: ntlm-dns-record-creation
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-29'
 status: production
 category: ntlm
 description: >-
@@ -19,7 +19,13 @@ search: |-
   index=windows EventCode=5137 Class=dnsNode
   | rex field=DN "^DC=(?<name>[^,]+)"
   | rename Account_Name as user
-  | table user name
+  | rex field=ComputerName "(?<host_key>[^.]+)"
+  | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
+  | eval host_key=lower(host_key), session_id=lower(session_id)
+  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Source_Network_Address) as logon_src by host_key session_id ]
+  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
+  | eval Source_Network_Address=coalesce(logon_src, host_ip)
+  | table Source_Network_Address user name
 how_to_implement: >-
   Required a real infra fix, bigger than the credential-exposure category's
   one: "Directory Service Changes" auditing being on is NOT enough by
@@ -55,6 +61,11 @@ known_false_positives: >-
   attribution field available.
 verification:
   date: '2026-09-27'
+  reverification_2026_09_29: >-
+    2026-09-29: 5137 DOES carry a Subject Logon ID (contrary to the earlier no-
+    source note) -- added the logon-session IP trace. Live re-fire (krbrelayx
+    dnstool add as user from 192.168.1.11) returns Attacker IP 192.168.1.11, so
+    this detection now populates a real source, not just user.
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: john-kali (VM 611)
   technique: >-

@@ -1,7 +1,7 @@
 name: Scheduled Task Creation (Local)
 id: host-persistence-scheduled-task-local
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-29'
 status: production
 category: host-persistence
 description: >-
@@ -17,16 +17,21 @@ data_source:
     (Logon Type 3) on the same host in the same window
 search: |-
   index=windows EventCode=4698
-  | rex field=ComputerName "(?<target>[^.]+)"
-  | join type=left target [
-      search index=windows EventCode=4624 Logon_Type=3 Source_Network_Address!="-" Source_Network_Address!="10.0.2.1"
-      | rex field=ComputerName "(?<target>[^.]+)"
-      | stats values(Source_Network_Address) as Source_Network_Address by target
-    ]
-  | where isnull(Source_Network_Address)
+  | rex field=ComputerName "(?<host_key>[^.]+)"
+  | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
+  | eval host_key=lower(host_key), session_id=lower(session_id), acct=lower(Subject_Account_Name)
+  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Logon_Type) as subj_type latest(Source_Network_Address) as exact_src by host_key session_id ]
+  | join type=left host_key acct [ search index=windows EventCode=4624 Logon_Type=3 earliest=-2m Source_Network_Address=* NOT Source_Network_Address IN ("-","10.0.2.1","127.0.0.1","::1","0.0.0.0") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), acct=lower(mvindex(Account_Name,-1)) | stats latest(Source_Network_Address) as fb_src by host_key acct ]
+  | eval exact_src=if(exact_src IN ("-","127.0.0.1","::1","0.0.0.0",""),null(),exact_src)
+  | eval src=coalesce(exact_src, fb_src)
+  | eval path=case(subj_type!=3,"local", src=="10.0.2.1" OR isnull(src),"admin", true(),"lateral")
+  | where path="local"
+  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
   | bucket _time span=1m
-  | stats values(Task_Name) as task values(Subject_Account_Name) as user by _time target
-  | table target user task
+  | stats values(Task_Name) as task values(Subject_Account_Name) as user values(host_ip) as host_ip by _time host_key
+  | eval Source_Network_Address=host_ip
+  | rename host_key as host
+  | table Source_Network_Address host user task
 how_to_implement: >-
   No infra fix needed -- shares its data source with Lateral Movement:
   Scheduled Task, just the inverted `isnull()` branch of the same join.
@@ -49,6 +54,11 @@ known_false_positives: >-
   detection's live window).
 verification:
   date: '2026-09-27'
+  reverification_2026_09_29: >-
+    2026-09-29: re-architected as the local (non-network subject session) branch
+    of the 4698 trace (see Lateral Movement: Scheduled Task). Live-verified: a
+    SYSTEM-created task (logon type 5) on workstation -> local with the host's
+    own IP (10.0.2.8) and now carries user.
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: workstation itself, via a locally-triggered SYSTEM task (see how_to_implement)
   technique: >-

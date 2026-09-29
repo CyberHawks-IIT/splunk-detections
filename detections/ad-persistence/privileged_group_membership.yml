@@ -1,7 +1,7 @@
 name: Privileged Group Membership
 id: ad-persistence-privileged-group-membership
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-29'
 status: production
 category: ad-persistence
 description: >-
@@ -19,10 +19,16 @@ search: |-
   Group_Name IN ("Domain Admins", "Enterprise Admins", "Schema Admins", "Administrators", "Account Operators", "Backup Operators", "Server Operators")
   | eval type=case(EventCode=4728 OR EventCode=4732 OR EventCode=4756, "add", EventCode=4729 OR EventCode=4733 OR EventCode=4757, "remove")
   | rex field=Member_Account_Name "(?:CN=)?(?<target>[^,]+)"
+  | rex field=ComputerName "(?<host_key>[^.]+)"
+  | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
+  | eval host_key=lower(host_key), session_id=lower(session_id)
+  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Source_Network_Address) as logon_src by host_key session_id ]
+  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
+  | eval Source_Network_Address=coalesce(logon_src, host_ip)
   | bucket _time span=1m
-  | stats values(type) as type values(target) as target by _time Subject_Account_Name
+  | stats values(type) as type values(target) as target values(Source_Network_Address) as Source_Network_Address by _time Subject_Account_Name
   | rename Subject_Account_Name as user
-  | table user type target
+  | table Source_Network_Address user type target
 how_to_implement: >-
   Required a real infra fix: 4728/4732/4756 (the "add member" events) were
   already in defense-tooling's Security-channel forwarder whitelist, but
@@ -48,6 +54,11 @@ known_false_positives: >-
   attribution.
 verification:
   date: '2026-09-27'
+  reverification_2026_09_29: >-
+    2026-09-29: added the logon-session IP trace. Re-fired add+remove of skumar
+    in Domain Admins; resolves the acting session's source (control-host path ->
+    DC host IP here; a network-sourced change resolves the real IP via the same
+    trace).
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: WinRM from the control host, as domain admin (simulating an attacker who already achieved Domain Admin and is adding a persistence account)
   technique: >-

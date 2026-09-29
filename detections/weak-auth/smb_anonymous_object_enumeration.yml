@@ -1,7 +1,7 @@
 name: SMB Anonymous Object Enumeration
 id: weak-auth-smb-anonymous-object-enumeration
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-29'
 status: production
 category: weak-auth
 description: >-
@@ -19,11 +19,19 @@ data_source:
     SamrEnumerateAliasesInDomain)
 search: |-
   index=zeek sourcetype=zeek:dce_rpc endpoint=samr (operation=SamrEnumerateUsersInDomain OR operation=SamrEnumerateGroupsInDomain OR operation=SamrEnumerateAliasesInDomain)
-  | eval objects=case(operation="SamrEnumerateUsersInDomain","users", operation="SamrEnumerateGroupsInDomain","groups", operation="SamrEnumerateAliasesInDomain","groups", 1=1, operation)
+  | lookup known_range_hosts ip AS id_resp_h OUTPUT hostname
+  | eval src=id_orig_h, host=lower(coalesce(hostname, id_resp_h)), method="samr", objects=case(operation="SamrEnumerateUsersInDomain","users", operation="SamrEnumerateGroupsInDomain","groups", operation="SamrEnumerateAliasesInDomain","groups", 1=1, operation)
+  | append [
+      search index=windows EventCode=5145 Share_Name="*IPC$*" (Relative_Target_Name=samr OR Relative_Target_Name=lsarpc)
+      | rex field=_raw "Account Name:\t*(?<acct>[^\r\n]+)"
+      | where like(acct,"ANONYMOUS LOGON")
+      | rex field=ComputerName "(?<host>[^.]+)"
+      | eval src=Source_Address, host=lower(host), method=Relative_Target_Name, objects=if(Relative_Target_Name="samr","users or groups","SID lookup")
+    ]
   | bucket _time span=1m
-  | stats values(objects) as objects by _time id_orig_h id_resp_h
-  | rename id_resp_h as host
-  | table id_orig_h host objects
+  | stats values(objects) as objects values(method) as method by _time src host
+  | rename src as Source_Network_Address
+  | table Source_Network_Address host method objects
 how_to_implement: >-
   Requires defense-tooling's Zeek sensor forwarding dce_rpc.log (already
   forwarded, already used by the DCSync/ADCS rows in this backlog). No
@@ -48,6 +56,15 @@ known_false_positives: >-
   against.
 verification:
   date: '2026-09-27'
+  reverification_2026_09_29: >-
+    2026-09-29: added a Windows leg (5145 IPC$ pipe-open on samr/lsarpc,
+    anonymous) alongside the existing Zeek dce_rpc SAMR leg, and a method field
+    (samr = SAMR enumeration; lsarpc = SID-lookup/RID-brute). The lsarpc leg
+    fires even though anonymous LsarLookupSids is access-denied in-range -- the
+    5145 pipe-open still records the attempt. Live-verified: impacket-samrdump +
+    impacket-lookupsid + netexec --users from 192.168.1.11 merge into one alert
+    per source+host+minute (method=[samr,lsarpc]), Attacker IP 192.168.1.11.
+    5145 already forwarded (no new ingestion).
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: john-kali (VM 611, 192.168.1.11)
   technique:
@@ -62,6 +79,7 @@ embed:
   title: SMB Anonymous Object Enumeration
   additional_fields:
     - host
+    - method
     - objects
 references:
   - 'detections/backlog.md, "Weak / missing authentication" (backlog row: "Anonymous logon / null session")'

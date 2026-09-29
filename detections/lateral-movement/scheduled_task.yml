@@ -1,7 +1,7 @@
 name: 'Lateral Movement: Scheduled Task'
 id: lateral-movement-scheduled-task
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-29'
 status: production
 category: lateral-movement
 description: >-
@@ -17,17 +17,19 @@ data_source:
     (Logon Type 3) on the same host in the same window
 search: |-
   index=windows EventCode=4698
-  | rex field=ComputerName "(?<target>[^.]+)"
-  | join type=left target [
-      search index=windows EventCode=4624 Logon_Type=3 Source_Network_Address!="-" Source_Network_Address!="10.0.2.1"
-      | rex field=ComputerName "(?<target>[^.]+)"
-      | eval user=mvfilter(Account_Name!="-")
-      | stats values(Source_Network_Address) as Source_Network_Address values(user) as user by target
-    ]
-  | where isnotnull(Source_Network_Address)
+  | rex field=ComputerName "(?<host_key>[^.]+)"
+  | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
+  | eval host_key=lower(host_key), session_id=lower(session_id), acct=lower(Subject_Account_Name)
+  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Logon_Type) as subj_type latest(Source_Network_Address) as exact_src by host_key session_id ]
+  | join type=left host_key acct [ search index=windows EventCode=4624 Logon_Type=3 earliest=-2m Source_Network_Address=* NOT Source_Network_Address IN ("-","10.0.2.1","127.0.0.1","::1","0.0.0.0") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), acct=lower(mvindex(Account_Name,-1)) | stats latest(Source_Network_Address) as fb_src by host_key acct ]
+  | eval exact_src=if(exact_src IN ("-","127.0.0.1","::1","0.0.0.0",""),null(),exact_src)
+  | eval src=coalesce(exact_src, fb_src)
+  | eval path=case(subj_type!=3,"local", src=="10.0.2.1" OR isnull(src),"admin", true(),"lateral")
+  | where path="lateral"
   | bucket _time span=1m
-  | stats values(Task_Name) as task values(user) as user by _time Source_Network_Address target
-  | table Source_Network_Address target user task
+  | stats values(Task_Name) as task values(Subject_Account_Name) as user by _time src host_key
+  | rename src as Source_Network_Address, host_key as host
+  | table Source_Network_Address host user task
 how_to_implement: >-
   No infra fix needed -- 4698/4624 were already forwarded and used by
   other detections. **Real design finding from live testing:** a naive
@@ -46,6 +48,18 @@ known_false_positives: >-
   legitimate remote task-scheduling tooling runs against this range.
 verification:
   date: '2026-09-27'
+  reverification_2026_09_29: >-
+    2026-09-29: RE-ARCHITECTED off the brittle same-minute join onto the 4698
+    Subject Logon ID -> 4624 trace, splitting local vs lateral by the acting
+    session's logon TYPE. KEY FINDING: NTLM remote logons come in pairs -- one
+    4624 carries the source IP, a near-simultaneous elevated one has source '-';
+    atexec/WinRM's task-creating session lands on the source-less one, so an
+    exact-session-only trace under-attributes them. Uses the exact session for
+    the logon type + a fallback join (latest source-bearing Type-3 4624 for the
+    same host+account, -2m) for the IP. Live-verified: atexec, wmiexec, and
+    evil-winrm task creation on sql1 all -> lateral with Attacker IP
+    192.168.1.11; control-host admin sessions (type-3, src 10.0.2.1/'-') are
+    dropped.
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: john-kali (VM 611, 192.168.1.11)
   technique: >-

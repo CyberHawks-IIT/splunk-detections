@@ -1,7 +1,7 @@
 name: NTLM Authentication
 id: ntlm-authentication
-version: 2
-date: '2026-09-27'
+version: 3
+date: '2026-09-29'
 status: production
 category: ntlm
 description: >-
@@ -19,7 +19,8 @@ search: |-
   | lookup known_range_hosts ip AS Source_Network_Address OUTPUT hostname
   | where isnull(hostname)
   | rename ComputerName as host, Account_Name as user
-  | table _time Source_Network_Address host user Package_Name__NTLM_only_ LogonType
+  | eval user=mvindex(user,-1)
+  | table Source_Network_Address host user
 how_to_implement: >-
   Requires defense-tooling's Windows forwarder shipping Security log 4624,
   and the known_range_hosts lookup (dt_detection_content, defense-tooling's
@@ -45,6 +46,10 @@ known_false_positives: >-
   NAT-masked the way this control host's traffic does.
 verification:
   date: '2026-09-27'
+  reverification_2026_09_29: >-
+    2026-09-29: trimmed the output to exactly Attacker IP + host + user (dropped
+    _time/Package_Name/LogonType) per the review pass. Re-verified live -- NTLM
+    auth from john-kali (192.168.1.11) surfaces correctly.
   method: Live attack execution against the cyberhawks.lab range
   attacker_source:
     - test (VMID 350, the dedicated relay/poisoning box, 10.0.2.10)
