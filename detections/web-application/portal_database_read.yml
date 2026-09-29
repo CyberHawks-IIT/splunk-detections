@@ -1,7 +1,7 @@
 name: Database Credential Read (admin)
 id: web-application-portal-database-read
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-29'
 status: production
 category: web-application
 description: >-
@@ -18,11 +18,14 @@ data_source:
     table read and excluding the app's own expected `svc-web`-from-`web`
     access pattern
 search: |-
-  index=mssql sourcetype=mssql_xe_text sql_text="*FROM Users*"
+  index=mssql sourcetype=mssql_xe_text sql_text="*FROM Users*" NOT username="NT SERVICE*"
   | where NOT (username="svc-web" AND client_hostname="WEB")
+  | eval host=replace(source, "_mssql_xe_text", "")
+  | lookup known_range_hosts hostname AS host OUTPUT ip AS host_ip
+  | join type=left host_ip [ search index=zeek sourcetype=zeek:conn id_resp_p=1433 NOT id_orig_h="10.0.10.2" | lookup known_range_hosts ip AS id_orig_h OUTPUT hostname AS src_known | where isnull(src_known) | rename id_resp_h as host_ip | stats latest(id_orig_h) as Source_Network_Address by host_ip ]
   | bucket _time span=1m
-  | stats values(username) as user by _time
-  | table user
+  | stats values(username) as user values(Source_Network_Address) as Source_Network_Address by _time
+  | table Source_Network_Address user
 how_to_implement: >-
   No infra fix needed for the detection itself -- the `detection_sql_text`
   XE session and its DB Connect forwarding were already set up for the SQL
@@ -53,6 +56,27 @@ known_false_positives: >-
   this range's design.
 verification:
   date: '2026-09-27'
+  reverification_2026_09_29: >-
+    2026-09-29: added the Attacker-IP field via a Zeek conn.log TCP/1433
+    correlation (the sqlserver.client_net_address XE action does not exist on
+    these SQL builds -- verified live -- and impacket's client_hostname is a
+    random DESKTOP-xxxx, not an IP). The correlation resolves the detection host
+    to its IP (known_range_hosts), then joins to a Zeek 1433 flow to that host
+    from a source that is neither the DB Connect monitor (10.0.10.2) nor a known
+    range host -- i.e. an external SQL client. Also excludes NT SERVICE*
+    principals (SQL-internal telemetry queries that merely mention the trigger
+    substrings, e.g. SQLTELEMETRY's config enumeration). Live-verified from
+    john-kali (192.168.1.11) running the real technique via impacket-
+    mssqlclient: all resolve Source_Network_Address=192.168.1.11. DOCUMENTED
+    CAVEAT (user-accepted): the 1433 correlation is by host, not by the exact
+    session, so on a host with concurrent external SQL clients in the same
+    window it can mis-attribute; in this low-traffic range the attacker is the
+    sole external 1433 source. This whole item was unblocked by fixing the DB
+    Connect ingestion: the mssql_xe_text inputs had been failing since
+    2026-09-28 12:01 with a Jackson self-reference error that MASKED the real
+    cause -- 'Login failed for user svc-sqlmonitor' (its SQL password had
+    drifted from DB Connect's stored identity). Reset svc-sqlmonitor's password
+    on sql1+sql2 to the committed value; inputs now flow.
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: john-kali (VM 611, 192.168.1.11)
   technique: >-
