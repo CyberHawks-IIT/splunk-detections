@@ -1,106 +1,128 @@
 name: LDAP Query
 id: enumeration-ldap-query
-version: 2
+version: 3
 date: '2026-09-29'
 status: production
 category: enumeration
 description: >-
-  A plain LDAP or LDAPS bind/search against a domain controller from an IP
-  not in this range's known static-IP inventory (i.e. not one of the range's
-  own domain-joined hosts) -- the network-visible half of any LDAP-based
-  enumeration tool (ldapsearch, BloodHound's SharpHound, netexec's `--users`/
-  `--groups`, etc). Correlated back to the DC's own 1644 "Field Engineering"
-  diagnostic log (logging every query, not just expensive ones, per the
-  registry thresholds below) by matching the TCP source port, which pulls
-  the actual LDAP filter and bind account for the plain-LDAP case.
+  An LDAP, LDAPS, or ADWS (Active Directory Web Services) session against a
+  domain controller from an IP not in this range's known static-IP inventory
+  (i.e. not one of the range's own domain-joined hosts) -- the network-visible
+  half of any directory enumeration tool (ldapsearch, BloodHound's SharpHound,
+  netexec's `--users`/`--groups`, the ActiveDirectory PowerShell module,
+  SOAPHound, etc). Every protocol is enriched with the actual search filter
+  and bind account from the DC's own 1644 "Field Engineering" log, which
+  logs every directory search (thresholds at 1 -- see how_to_implement).
+  Plain LDAP and LDAPS are joined exactly, by client IP + TCP source port
+  (1644 is logged by the DC's LDAP engine after TLS is terminated, so LDAPS
+  carries full content too). ADWS is joined by time: ADWS runs each search
+  on the DC over loopback, so its 1644 shows client `[::1]` with the real
+  remote user, and is matched to the Zeek 9389 session to the same DC whose
+  lifetime contains it.
 data_source:
   - >-
-    Zeek `conn.log` (TCP/389 for plain LDAP, TCP/636 for LDAPS, since Zeek
-    can't decrypt the LDAPS wire content) correlated by source port to
-    Windows Events 1644 (Field Engineering, Directory Service log) on the
-    same DC for the query content and bind account
+    Zeek `conn.log` (TCP/389 LDAP, TCP/636 LDAPS, TCP/9389 ADWS) for the
+    attacker IP, correlated to Windows Event 1644 (Field Engineering,
+    Directory Service log, dc1/dc2) for the query content and bind account:
+    by client IP + source port for LDAP/LDAPS, by DC + connection time window
+    (Zeek `ts` .. `ts`+`duration`, +/-2s) for ADWS's loopback 1644s
 search: |-
   index=zeek sourcetype=zeek:conn (id_resp_p=389 OR id_resp_p=636 OR id_resp_p=9389)
   | lookup known_range_hosts ip AS id_orig_h OUTPUT hostname
   | where isnull(hostname)
   | eval protocol=case(id_resp_p=389, "ldap", id_resp_p=636, "ldaps", id_resp_p=9389, "adws")
   | rename id_orig_h as Source_Network_Address, id_resp_h as host, id_orig_p as client_port
-  | join type=left client_port [
-      search index=windows LogName="Directory Service" EventCode=1644
-      | rex field=_raw "Client:\r?\n[0-9.]+:(?<client_port>\d+)"
+  | lookup known_range_hosts ip AS host OUTPUT hostname AS dc
+  | eval conn_start=tonumber(ts), conn_end=conn_start+coalesce(tonumber(duration), 0), adws_dc=if(protocol="adws", dc, null())
+  | join type=left Source_Network_Address client_port [
+      search index=windows source="WinEventLog:Directory Service" EventCode=1644 earliest=-5m latest=now
+      | rex field=_raw "Client:\r?\n(?<Source_Network_Address>[0-9.]+):(?<client_port>\d+)"
+      | where isnotnull(client_port)
       | rex field=_raw "Filter:\r?\n\s*(?<query>.+?)\s*\r?\n"
       | rex field=_raw "User:\r?\n(?<user>\S+)"
-      | table client_port query user
+      | stats values(user) as user values(query) as query by Source_Network_Address client_port
     ]
+  | join type=left max=0 adws_dc [
+      search index=windows source="WinEventLog:Directory Service" EventCode=1644 earliest=-5m latest=now
+      | rex field=_raw "Client:\r?\n\[?(?<client_ip>[^\]\s]+?)\]?:\d+\s"
+      | where client_ip="::1" OR client_ip="127.0.0.1"
+      | rex field=_raw "User:\r?\n(?<adws_user>\S+)"
+      | where NOT like(adws_user, "%$") AND adws_user!="UNAVAILABLE"
+      | rex field=_raw "Filter:\r?\n\s*(?<adws_query>.+?)\s*\r?\n"
+      | eval adws_dc=lower(host), q_time=_time
+      | table adws_dc q_time adws_user adws_query
+    ]
+  | eval in_window=if(q_time>=conn_start-2 AND q_time<=conn_end+2, 1, 0)
+  | eval user=if(protocol="adws", if(in_window=1, adws_user, null()), user), query=if(protocol="adws", if(in_window=1, adws_query, null()), query)
   | bucket _time span=1m
   | stats values(user) as user values(query) as query by _time Source_Network_Address host protocol
   | table Source_Network_Address host protocol user query
 how_to_implement: >-
-  Required a real infra fix, found live: the domain-root registry values
-  this detection depends on ("Search Time Threshold (msecs)" and "Expensive
-  Search Results Threshold" under NTDS\Parameters, both already set to 0 by
-  an earlier session) were confirmed present but produced **zero** 1644
-  events under live testing -- the NTDS service on dc1 had never been
-  restarted since those values were set, and (like the SAM/LSA
-  FullPrivilegeAuditing registry value found earlier this session) NTDS
-  reads its diagnostic-logging config once at service start, not live.
-  Fixed by `net stop ntds /y` + `net start ntds` on dc1 (also cycles the
-  Kerberos KDC/DNS Server/DFSR services that depend on NTDS -- confirmed
-  all four came back healthy, DNS took ~15s longer than the others to
-  finish starting, and `repadmin /replsummary` showed 0/5 fails both
-  directions afterward). **Separate real infra fix:** Zeek's `ldap.log`
-  (needed to confirm the plain-LDAP path's content independently of the
-  1644 correlation, and to have a real header to fill in the previously
-  string TBD `zeek_ldap_fields` extraction) had no Splunk field extraction
-  at all -- `dt_detection_content_props.conf`/`transforms.conf` had
-  intentionally left it out (comment: "ldap.log intentionally omitted until
-  a real header can be read"). Read the real `#fields` header off the Zeek
-  sensor's live `ldap.log` and added the `[zeek:ldap]`/`zeek_ldap_fields`
-  stanzas following the exact same REPORT+transforms.conf DELIMS/FIELDS
-  pattern as conn/dns/dce_rpc/kerberos, applied live to the indexer (510).
-  **Real, verified finding, not a gap left unexplored:** LDAPS queries
-  (tested live, same technique over `ldaps://`) do NOT produce a 1644 event
-  at all, confirmed on dc1's local Security... er, Directory Service log
-  directly (zero results even after the NTDS-restart fix that made plain
-  LDAP's 1644 logging work) -- so the join intentionally leaves `user`/
-  `query` empty for the `ldaps` protocol value; `Source_Network_Address`/
-  `host`/`protocol` are the only fields available for encrypted LDAP,
-  exactly as the original backlog design anticipated ("Zeek can't decrypt
-  the wire traffic"). **ADWS (TCP/9389) branch implemented + verified
-  2026-09-29** from john-windows (a Windows attacker box, 192.168.1.10)
-  running `Get-ADUser -Server 10.0.2.2 -Credential cyberhawks\user` -- the
-  AD PowerShell cmdlets go over ADWS/9389. Added 9389 to the conn.log leg
-  with `protocol=adws`. Confirmed live: Zeek captures the 9389 flow
-  (192.168.1.10 -> 10.0.2.2), giving Attacker IP + host. As anticipated,
-  `user`/`query` are empty for `adws` exactly like `ldaps`: ADWS proxies the
-  query to LOCAL LDAP on the DC, so no 1644 event carrying the remote
-  client's port is produced, and the client-port join cannot match. `adws`
-  and `ldaps` both yield Attacker IP + host + protocol only; plain `ldap`
-  (389) additionally recovers user/query from 1644.
+  **1644 must log every search, and the thresholds must be 1, not 0.**
+  cyber-range's `configure_1644.ps1` sets Field Engineering (NTDS\Diagnostics
+  "15 Field Engineering") to 5 and "Search Time Threshold (msecs)",
+  "Expensive Search Results Threshold", and "Inefficient Search Results
+  Threshold" (NTDS\Parameters) all to 1. Until 2026-09-29 it set them to 0,
+  which Microsoft documents as "use the default" (30000 ms / 10000 visited /
+  1000 visited) -- so only slow or unindexed searches logged, and indexed
+  recon like `(sAMAccountName=administrator)` or `(servicePrincipalName=*)`
+  (Kerberoast SPN enumeration) produced no 1644 at all over any protocol.
+  At 1, a single-object indexed lookup (1 entry visited) logs. The
+  thresholds are read live (no NTDS restart). The anonymous RootDSE read
+  never logs (not a directory search), and AD rejects anonymous subtree
+  searches before they execute, so neither produces a 1644. **Earlier
+  versions of this file said LDAPS and ADWS produce no 1644 -- both wrong,
+  corrected 2026-09-29:** LDAPS logs identically to plain LDAP (real client
+  IP:port, user, filter -- the earlier LDAPS test simply used a filter that
+  fell under the default thresholds), and ADWS logs with client `[::1]`
+  and the real remote user (e.g. `CYBERHAWKS\dsmith`). ADWS attribution
+  can't use the DC's 4624 either (the ADWS network logon records Source
+  Network Address `-`), hence the Zeek 9389 time join; the approach mirrors
+  Huntress's published ADWS attribution work (1644 `[::1]` correlated to the
+  9389 connection by time). The join uses Zeek's `ts` field, not `_time`:
+  this range's Zeek `_time` is set near index time (minute-rounded), up to
+  ~a minute after the real connection start, which is also why both 1644
+  subsearches look back `-5m` rather than inheriting the `-1m` schedule
+  window. **Volume:** with every search logging, the DCs' own background
+  searches were ~52 MB/day of 1644 -- dropped at the forwarder by
+  defense-tooling's dc1/dc2 Directory Service blacklist (DC machine accounts
+  DC1$/DC2$ and user UNAVAILABLE internal DS operations only; any other
+  `$` account, e.g. an attacker-created machine account, is still
+  forwarded). The rest of this detection's history: Zeek's `ldap.log` field
+  extraction was added to `dt_detection_content` (2026-09-27), and NTDS on
+  dc1 was restarted then on the belief that the 0 thresholds needed it --
+  that restart was not the real fix (see above).
 known_false_positives: >-
   `known_range_hosts` excludes every domain-joined host's static IP, so
-  ordinary intra-domain LDAP traffic (workstation group policy refresh,
-  member servers querying the DC) never reaches this search. Revisit if a
-  legitimate non-domain-joined tool (a vulnerability scanner, an LDAP-based
+  ordinary intra-domain LDAP/ADWS traffic (group policy refresh, member
+  servers querying the DC, RSAT from the workstation) never reaches this
+  search. ADWS query attribution is by time, not an exact key: if an
+  in-range admin's ADWS session overlaps an outside ADWS session to the
+  same DC, the admin's queries would be listed on the outside alert too
+  (the alert itself still only fires for the outside IP). Revisit if a
+  legitimate non-domain-joined LDAP/ADWS client (a vulnerability scanner, a
   monitoring agent) is ever added to this range.
 verification:
-  date: '2026-09-27'
+  date: '2026-09-29'
   method: Live attack execution against the cyberhawks.lab range
-  attacker_source: john-kali (VM 611, 192.168.1.11)
+  attacker_source: john-kali (VM 611, 192.168.1.11) for LDAP/LDAPS; john-windows (VM 610, 192.168.1.10) for ADWS
   technique: >-
-    ldapsearch -x -H ldap://10.0.2.2 -D 'dsmith@cyberhawks.lab' -w
-    Summer2026 -b 'DC=cyberhawks,DC=lab' '(description=*)' cn description
-    (an unindexed wildcard search, incidentally surfacing a real leaked
-    credential in csmith's description field -- the separate description-
-    field-password finding under this same category); also
-    LDAPTLS_REQCERT=never ldapsearch ... -H ldaps://10.0.2.2 ... for the
-    LDAPS path
+    From john-kali: `ldapsearch -x -H ldap://10.0.2.2 -D dsmith@cyberhawks.lab
+    ...` with an indexed filter `(sAMAccountName=administrator)`, and the
+    same over `ldaps://` with `(servicePrincipalName=*)` -- both produced no
+    1644 at all before the threshold fix. From john-windows: `Get-ADUser
+    -Server 10.0.2.2 -Credential cyberhawks\dsmith -Filter 'adminCount -eq 1'`
+    over ADWS/9389.
   result: >-
-    Plain LDAP fired exactly once per query, correctly correlated to the
-    real filter `(description=*)` and bind account `dsmith@cyberhawks.lab`
-    via source-port matching to the 1644 event. LDAPS fired exactly once
-    per connection with protocol=ldaps and no user/query (confirmed real
-    limitation, not a bug -- see how_to_implement).
+    Live via the deployed scheduled search (2026-09-29, after the threshold
+    fix + forwarder blacklist): the 12:59 run returned exactly two rows --
+    ldap (192.168.1.11 -> 10.0.2.2, user dsmith@cyberhawks.lab, query
+    `(description=*) (sAMAccountName=administrator)`) and ldaps (same IP/
+    user, query `(servicePrincipalName=*)`); the 13:00 run returned exactly
+    one adws row (192.168.1.10 -> 10.0.2.2, user CYBERHAWKS\dsmith, query =
+    every filter the cmdlet issued, including `(servicePrincipalName=*)` and
+    ADWS's own schema lookups). Negative control: workstation (a range
+    host) querying dc1 as its machine account produced no alert.
 embed:
   title: LDAP Query
   additional_fields:
@@ -111,6 +133,8 @@ embed:
 references:
   - 'detections/backlog.md, "Enumeration (info pulled)" (backlog row: "LDAP query content")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+  - https://learn.microsoft.com/en-us/troubleshoot/windows-server/active-directory/event1644reader-analyze-ldap-query-performance
+  - https://www.huntress.com/blog/ldap-active-directory-detection-part-5b
 schedule:
   cron: '* * * * *'
   earliest: '-1m'

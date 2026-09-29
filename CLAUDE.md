@@ -199,6 +199,38 @@ extraction row in `backlog.md` is flagged as needing the same verification
 before assuming its SACL-only design actually fires — `ntdsutil`'s IFM path
 plausibly hits the same backup-privilege gap.
 
+## LDAP query logging: 1644 thresholds are 1, not 0 (2026-09-29)
+
+Asked to get full LDAP query content for LDAPS and ADWS too. Findings, all
+confirmed live on dc1 (Server 2016):
+
+- **The 1644 layer was silently partial.** cyber-range set the NTDS
+  search thresholds to 0 intending "log everything," but 0 means "use the
+  default" (30 s / 10,000 visited / 1,000 inefficient) — only slow or
+  unindexed searches logged, over *any* protocol. Indexed recon
+  (`(sAMAccountName=x)`, `(servicePrincipalName=*)`) never appeared. Fixed
+  to 1 for all three (read live, no NTDS restart).
+- **LDAPS and ADWS both log to 1644** — the earlier "verified gaps" were
+  artifacts of the thresholds. LDAPS logs the real client IP:port. ADWS
+  runs searches over loopback, so it logs client `[::1]` with the real
+  remote user; the DC's 4624 for ADWS has no source IP, so attribution is
+  a time join to Zeek's 9389 session (same approach Huntress published).
+- **Alternatives considered and rejected:** there's no server-side "LDAP
+  Operational" channel on these DCs; `Microsoft-Windows-LDAP-Client/Debug`
+  (Sigma's `win_ldap_recon`) is client-side only — it would never see
+  john-kali. Elastic/Splunk-content LDAP rules use 4662 attribute reads or
+  process/command-line telemetry, neither of which gives query text (and
+  the latter violates the action-based rule).
+- **Volume (free tier, 500 MB/day):** full 1644 logging is ~52 MB/day, almost
+  all the DCs' own searches — dropped at the forwarder (DC machine accounts +
+  `UNAVAILABLE` internal ops only). While measuring, found a far bigger
+  problem: the forwarder's own 4673/4674 feedback loop (reading the
+  Security log with SeBackupPrivilege under `FullPrivilegeAuditing`) was
+  ~29 GB/day; blacklisted at the forwarder for the UF's own binaries.
+- **Zeek `_time` is not the connection time.** It's near index time,
+  minute-rounded; the real start is the `ts` field. Any SPL that needs
+  sub-minute Zeek timing must use `ts`.
+
 ## Status
 
 Implementation phase started 2026-09-27 (step 5 of the monitoring rollout
