@@ -15,6 +15,13 @@ and get their own YAML file under `detections/<category>/`, compiled into
 [app/default/savedsearches.conf](app/default/savedsearches.conf).
 See [CLAUDE.md](CLAUDE.md) before adding any.
 
+> **Setting up the whole range + monitoring?** Follow cyber-range's end-to-end
+> guide:
+> **[range-with-monitoring.md](https://github.com/CyberHawks-IIT/cyber-range/blob/main/docs/setup/range-with-monitoring.md)**.
+> It covers deploying this content automatically — defense-tooling's
+> `splunk_indexer` role drops this repo's `app/` into Splunk when you point
+> `splunk_detections_app_src` at it, so you don't copy files by hand.
+
 ## How the pieces fit together
 
 | Repo | Role |
