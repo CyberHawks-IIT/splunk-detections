@@ -26,7 +26,7 @@ data_source:
     Security log 4887 (certificate issued -- `Requester`, `Request ID`,
     `Certificate_Template`), already forwarded via the ca whitelist
 search: |-
-  index=windows host=ca EventCode=4887 DCOMorRPC=DCOM _index_earliest=-3m@m _index_latest=-2m@m
+  index=windows host=ca EventCode=4887 DCOMorRPC=DCOM _index_earliest=-2m@m _index_latest=-1m@m
   | rex field=_raw "Requester:\s+(?<ruser>[^\r\n]+)"
   | rex field=_raw "Request ID:\s+(?<id>\S+)"
   | eval user=lower(mvindex(split(trim(ruser),"\\"),-1))
@@ -85,12 +85,12 @@ known_false_positives: >-
   and the CA event share no request identifier.
 throttle: [attacker_ip, id]
 changes_2026_09_30: >-
-  Index-time window like every detection, but one minute later than the
-  shared `detection_window`: the attacker IP comes from the IIS POST, and
-  IIS lines reach Splunk up to ~60s after the 4887, so this gives them two
-  minutes. Still one row per Request ID. The IIS join now also keeps a
-  request whose POST it can't find (attacker_ip blank) instead of dropping
-  the alert. Runs every minute over the events indexed in the previous
+  Index-time window like every detection, but one minute further back than
+  the shared `detection_window`: the attacker IP comes from the IIS POST, and
+  IIS lines reach Splunk up to ~60s after the 4887, so this gives the POST an
+  extra minute to be indexed before the 4887 is evaluated. Still one row per
+  Request ID. The IIS join now also keeps a request whose POST it can't find
+  (attacker_ip blank) instead of dropping the alert. Runs every minute over the events indexed in the previous
   minute (`detection_window`), so an event is evaluated however late it
   arrives; before this, each run searched the last minute of event time,
   and anything indexed after its run (Security up to ~50s late, Zeek conn
