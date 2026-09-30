@@ -78,9 +78,19 @@ def render_stanza(d, discord=False):
         f"enableSched = 1\n"
         f"disabled = {disabled}\n"
         f"alert.severity = 4\n"
-        f"alert_type = number of events\n"
-        f"alert_comparator = greater than\n"
-        f"alert_threshold = 0\n"
+        # Trigger only when the search returns results. These are the
+        # savedsearches.conf keys; the alert_type/alert_comparator/
+        # alert_threshold names this build used before are the web UI's REST
+        # parameters, which the conf file silently ignores, so every run of
+        # every search counted as triggered (found 2026-09-30 once the Discord
+        # action ran on each of those phantom triggers).
+        f"counttype = number of events\n"
+        f"relation = greater than\n"
+        f"quantity = 0\n"
+        # Always list fired alerts under Activity > Triggered Alerts. The
+        # default (auto) defers to the actions' track_alert, and discord_alert
+        # ships track_alert = 0, so wiring Discord would otherwise hide them.
+        f"alert.track = 1\n"
     )
     if discord:
         # The stanza name is the embed title (this repo's convention: the

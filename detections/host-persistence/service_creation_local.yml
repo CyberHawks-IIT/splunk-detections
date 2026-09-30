@@ -1,6 +1,6 @@
 name: Service Creation (Local)
 id: host-persistence-service-creation-local
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: host-persistence
@@ -16,6 +16,8 @@ data_source:
     (Logon Type 3) on the same host in the same window
 search: |-
   index=windows (EventCode=4697 OR EventCode=7045)
+  | eval svc_type=tonumber(replace(Service_Type, "^0x", ""), 16)
+  | where isnull(svc_type) OR floor(svc_type/128)%2=0
   | rex field=ComputerName "(?<host_key>[^.]+)"
   | rex field=_raw "Logon ID:\s+(?<sid>0x[0-9A-Fa-f]+)"
   | eval host_key=lower(host_key)
@@ -49,6 +51,17 @@ how_to_implement: >-
 known_false_positives: >-
   None expected -- no legitimate local service-installation workflow
   exists in this range outside initial provisioning.
+
+  2026-09-30: fired with 14 rows on web (CDPUserSvc_3c1e3,
+  WpnUserService_3c1e3, ...), posted to Discord minutes after alerting went
+  live. These are per-user service instances Windows creates from its
+  built-in templates whenever a user logs on (suffix = logon-session LUID),
+  logged as a 4697 by LocalSystem. Excluded structurally, not by name: their
+  Service_Type has the SERVICE_USERSERVICE_INSTANCE bit (0x80) set (0xD0/
+  0xE0), which Windows applies only to those automatic copies. A service an
+  attacker creates (sc create, PsExec, impacket services, a new per-user
+  template at 0x50/0x60) never carries it, so it still fires. Events whose
+  Service_Type isn't hex (7045's text form) are kept.
 verification:
   date: '2026-09-27'
   reverification_2026_09_29: >-
