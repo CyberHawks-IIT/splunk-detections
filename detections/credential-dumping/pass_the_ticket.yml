@@ -30,10 +30,12 @@ search: |-
   | where isnotnull(as_ips) AND already_known=0
   | eval origin=mvindex(as_ips, 0)
   | lookup known_range_hosts ip AS origin OUTPUT hostname AS origin_name | eval origin=coalesce(origin_name, origin)
-  | rename id_orig_h as destination
-  | stats values(origin) as origin values(service) as service by client destination
+  | rename id_orig_h as attacker_ip
+  | eval user=replace(client,"[/@].*","")
+  | stats values(origin) as origin by attacker_ip user service
   | `normalize_host(origin)`
-  | table client origin destination service
+  | `normalize_user(user)`
+  | table attacker_ip origin user service
 how_to_implement: >-
   No infra fix needed -- Zeek's `kerberos.log` (`request_type`/`client`/
   `service`/`id_orig_h`) is forwarded and extracted. Same-vnet Kerberos now
@@ -63,7 +65,7 @@ known_false_positives: >-
   fire -- an intentional trade to eliminate the blank-origin false positives;
   reuse is only asserted when the initial authentication was actually seen
   from another host.
-throttle: [destination, client]
+throttle: [attacker_ip, user, service]
 changes_2026_09_30: >-
   One row per reusing host and ticket owner (the minute bucket is gone).
   Runs over the events indexed in the recent window (`detection_window`), so
@@ -77,6 +79,12 @@ changes_2026_09_30: >-
   now requires positive AS evidence (`isnotnull(as_ips)`) so it never claims
   reuse for a principal whose initial authentication was never observed --
   which also removes the S4U constrained-delegation false-positive caveat.
+  **Output fields changed (2026-09-30, user request):** now a standard
+  `attacker_ip` (the TGS-REQ source, resolved by Discord like every other
+  detection) instead of the old `destination` + `attacker_field` special
+  case; `client` renamed to `user` (bare account); `service` added to the
+  embed. Columns: attacker_ip, origin, user, service. Throttle keys on
+  attacker_ip + user + service.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
@@ -87,18 +95,18 @@ verification:
     (the original AS-REQ's source), once from 192.168.1.199 (no AS-REQ ever
     seen from this IP for dsmith)
   result: >-
-    Fired exactly once, correctly identifying origin=192.168.1.11,
-    destination=192.168.1.199, client=dsmith/CYBERHAWKS.LAB,
-    service=cifs/sql1.cyberhawks.lab. Cleanup: removed the temporary
-    secondary IP/route from john-kali afterward.
+    Fired exactly once, correctly identifying origin=192.168.1.11 (the
+    AS-REQ host), attacker_ip=192.168.1.199 (the reusing TGS-REQ host),
+    user=dsmith, service=cifs/sql1.cyberhawks.lab. Cleanup: removed the
+    temporary secondary IP/route from john-kali afterward. (Field names
+    predate the 2026-09-30 rename -- this run reported the same values under
+    the old destination/client columns.)
 embed:
   title: Pass-the-Ticket
-  # No attacker_ip column (ticket-reuse semantics): the attacker is the host
-  # reusing the ticket, so the Discord description resolves `destination`.
-  attacker_field: destination
   additional_fields:
     - origin
-    - destination
+    - user
+    - service
 references:
   - 'detections/backlog.md, "Credential & ticket dumping" (backlog row: "Pass-the-ticket / ticket reuse")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)

@@ -122,10 +122,11 @@ scoped to source IP + the planner's fields) came out of this same pass.
   source IP (the Attacker-lookup key) is always the first column and named
   **`attacker_ip`**; the targeted host is always **`host`**. Every `| table`
   is exactly `attacker_ip` + the planner's additional fields, in the same
-  order as `embed.additional_fields`. (The one exception is Pass-the-Ticket,
-  whose ticket-reuse semantics report `origin`/`destination` rather than a
-  single attacker IP; its `embed.attacker_field: destination` tells the
-  Discord action which column to resolve to an attacker name.) The Discord
+  order as `embed.additional_fields`. (Pass-the-Ticket was formerly an
+  exception here -- it reported `origin`/`destination` with an
+  `embed.attacker_field: destination` -- but as of 2026-09-30 it conforms to
+  the standard: `attacker_ip` is the reusing TGS-REQ source, plus `origin`
+  (the AS-REQ host), `user`, and `service`.) The Discord
   embed description is "Full Name (attacker_ip)", resolved on the indexer
   from defense-tooling's Proxmox-derived attacker directory (see its
   `docs/discord-alerting.md`), so `attacker_ip` must be a raw source IP.
