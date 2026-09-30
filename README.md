@@ -60,6 +60,14 @@ setting `discord_webhook_url`, which builds the app with `build_app.py --discord
 and installs the `discord_alert` action. See
 [defense-tooling/docs/discord-alerting.md](https://github.com/CyberHawks-IIT/defense-tooling/blob/main/docs/discord-alerting.md).
 
+### Turning a detection off
+
+To stop a detection firing without deleting it, set `disabled: true` in its
+YAML and add a short `disabled_reason`. Then rebuild and redeploy. It still
+compiles into `savedsearches.conf`, with `disabled = 1`, so neither Splunk's
+scheduler nor the 15s dispatcher runs it. Set `disabled: false` to turn it
+back on. **NTLM Authentication** is disabled this way (2026-09-30).
+
 ## Contributing a detection
 
 1. Find (or add) the entry in `backlog.md`.

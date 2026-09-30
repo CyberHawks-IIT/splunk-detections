@@ -82,7 +82,14 @@ def render_stanza(d, discord=False):
     if isinstance(throttle_fields, str):
         throttle_fields = [throttle_fields]
     disabled = "1" if d.get("disabled", True) else "0"
+    # A disabled detection keeps its whole stanza (disabled = 1), so it can be
+    # switched back on by flipping the YAML's `disabled` without rewriting it.
+    # Neither Splunk's scheduler nor the 15s dispatcher runs a disabled search.
+    note = ""
+    if disabled == "1" and d.get("disabled_reason"):
+        note = f"# Disabled: {' '.join(d['disabled_reason'].split())}\n"
     stanza = (
+        f"{note}"
         f"[{d['name']}]\n"
         f"search = {search}\n"
         f"description = {description}\n"
@@ -164,7 +171,8 @@ def main():
         f.write("\n".join(stanzas))
     print(f"Wrote {len(detections)} saved search(es) to {os.path.relpath(OUTPUT_PATH, REPO_ROOT)}:")
     for d in detections:
-        print(f"  - {d['name']}  ({d['_source_path']})")
+        state = "  [DISABLED]" if d.get("disabled", True) else ""
+        print(f"  - {d['name']}  ({d['_source_path']}){state}")
 
 
 if __name__ == "__main__":

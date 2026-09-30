@@ -94,4 +94,8 @@ references:
   - >-
     detections/backlog.md, "NTLM relay & coercion" (backlog row: "Relayed
     SMB or LDAP connection")
-disabled: false
+disabled: true
+disabled_reason: >-
+  Turned off at the user's request (2026-09-30). The definition is kept so it
+  can be switched back on. To re-enable it, set `disabled: false`, rebuild,
+  and redeploy the app.
