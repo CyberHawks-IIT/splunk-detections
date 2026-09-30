@@ -1,6 +1,6 @@
 name: Scheduled Task Creation (Local)
 id: host-persistence-scheduled-task-local
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: host-persistence
@@ -20,6 +20,15 @@ search: |-
   | rex field=ComputerName "(?<host_key>[^.]+)"
   | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
   | eval host_key=lower(host_key), session_id=lower(session_id), acct=lower(Subject_Account_Name)
+  | rex field=_raw "Security ID:\s+(?<subject_sid>S-[0-9-]+)"
+  | rex field=_raw "<URI>(?<task_uri>[^<]*)</URI>"
+  | rex field=_raw "<UserId>(?<task_principal>[^<]*)</UserId>"
+  | rex field=_raw "<Actions Context=\"(?<task_context>[^\"]*)\">"
+  | rex field=_raw max_match=0 "<(?<task_action>Exec|ComHandler|SendEmail|ShowMessage)>"
+  | rex field=_raw "<Command>(?<task_cmd>[^<]*)</Command>"
+  | rex field=_raw "<Arguments>(?<task_args>[^<]*)</Arguments>"
+  | eval defender_scan=if(session_id="0x3e7" AND subject_sid="S-1-5-18" AND Task_Name="\\Microsoft\\Windows\\Windows Defender\\Windows Defender Scheduled Scan" AND task_uri=Task_Name AND task_principal="S-1-5-18" AND task_context="LocalSystem" AND mvcount(task_action)=1 AND task_action="Exec" AND match(task_cmd, "^C:\\\\ProgramData\\\\Microsoft\\\\Windows Defender\\\\Platform\\\\[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\\\\MpCmdRun\.exe$") AND task_args="Scan -ScheduleJob -ScanTrigger 55 -IdleScheduledJob", 1, 0)
+  | where defender_scan=0
   | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Logon_Type) as subj_type latest(Source_Network_Address) as exact_src by host_key session_id ]
   | join type=left host_key acct [ search index=windows EventCode=4624 Logon_Type=3 earliest=-2m Source_Network_Address=* NOT Source_Network_Address IN ("-","10.0.2.1","127.0.0.1","::1","0.0.0.0") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), acct=lower(mvindex(Account_Name,-1)) | stats latest(Source_Network_Address) as fb_src by host_key acct ]
   | eval exact_src=if(exact_src IN ("-","127.0.0.1","::1","0.0.0.0",""),null(),exact_src)
@@ -55,8 +64,32 @@ known_false_positives: >-
   None expected -- no legitimate local task-scheduling workflow exists in
   this range outside of range provisioning itself (which predates any
   detection's live window).
+
+  2026-09-30: fired on Windows Defender re-registering its own
+  "Windows Defender Scheduled Scan" task as SYSTEM around reboots and
+  platform updates (8 rows in 24h on dc2, ca, sql2, web). Excluded only when
+  EVERY property matches Defender's own registration: subject SYSTEM
+  (S-1-5-18, Logon ID 0x3E7); exact task name, with the XML URI equal to it;
+  principal S-1-5-18 and action context LocalSystem; exactly one action, an
+  Exec; command exactly C:\ProgramData\Microsoft\Windows
+  Defender\Platform\<n.n.n.n-n>\MpCmdRun.exe (only the platform version
+  may vary, since it changes on every Defender platform update); arguments
+  exactly "Scan -ScheduleJob -ScanTrigger 55 -IdleScheduledJob". Anything
+  else under that name (a different or lookalike binary, extra arguments or
+  actions, a COM handler, a user creator or principal) still fires. The one
+  residual blind spot is a task byte-identical to Defender's, which runs
+  only Defender's real signed scanner. The command match is on the task's
+  registered action, not an attacker's command line.
 verification:
   date: '2026-09-27'
+  reverification_2026_09_30: >-
+    Defender exclusion: all 8 real Defender re-registrations from the last
+    30h evaluate as excluded; 13 synthetic variants built from a real event
+    (genuine, newer platform version, binary outside the Platform dir,
+    lookalike path, renamed binary, appended payload, changed arguments,
+    second Exec, extra ComHandler, different task name, user-session
+    creator, user principal, non-LocalSystem context) all classify as
+    expected: only the first two are excluded.
   reverification_2026_09_29: >-
     2026-09-29: re-architected as the local (non-network subject session) branch
     of the 4698 trace (see Lateral Movement: Scheduled Task). Live-verified: a
