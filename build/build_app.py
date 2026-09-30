@@ -91,6 +91,12 @@ def render_stanza(d, discord=False):
         # default (auto) defers to the actions' track_alert, and discord_alert
         # ships track_alert = 0, so wiring Discord would otherwise hide them.
         f"alert.track = 1\n"
+        # Continuous scheduling: when a run is delayed (the scheduler's
+        # concurrency cap is reached), run it later over its own window
+        # instead of skipping it. With the default (1) Splunk silently skipped
+        # ~8.5% of runs on a 1-core indexer (2026-09-30), and a skipped
+        # window is an attack that never alerts or reaches Discord.
+        f"realtime_schedule = 0\n"
     )
     if discord:
         # The stanza name is the embed title (this repo's convention: the
