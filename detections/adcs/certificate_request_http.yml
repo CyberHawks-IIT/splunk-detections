@@ -21,12 +21,13 @@ description: >-
   `RPC` path and never touches IIS.
 data_source:
   - >-
-    IIS W3C access log on `ca` (`index=iis`, host=ca, `cs_uri_stem`,
-    `cs_method`, `cs_username`, `c_ip`, `sc_status`) correlated with the CA
-    Security log 4887 (certificate issued -- `Requester`, `Request ID`,
-    `Certificate_Template`), already forwarded via the ca whitelist
+    IIS request logging on `ca` from the Microsoft-IIS-Logging/Logs ETW
+    channel (`index=iis`, host=ca, `cs_uri_stem`, `cs_method`, `cs_username`,
+    `c_ip`, `sc_status`) correlated with the CA Security log 4887 (certificate
+    issued -- `Requester`, `Request ID`, `Certificate_Template`), already
+    forwarded via the ca whitelist
 search: |-
-  index=windows host=ca EventCode=4887 DCOMorRPC=DCOM _index_earliest=-2m@m _index_latest=-1m@m
+  index=windows host=ca EventCode=4887 DCOMorRPC=DCOM `detection_window`
   | rex field=_raw "Requester:\s+(?<ruser>[^\r\n]+)"
   | rex field=_raw "Request ID:\s+(?<id>\S+)"
   | eval user=lower(mvindex(split(trim(ruser),"\\"),-1))
@@ -43,10 +44,12 @@ search: |-
   | `normalize_user(user)`
   | table attacker_ip user template id
 how_to_implement: >-
-  Requires IIS log forwarding from `ca` (index=iis, ms:iis:auto -- see
-  defense-tooling's splunk_forwarder_windows role; ca's IIS logging exists
-  specifically for this detection) and 4886/4887 in ca's Security whitelist
-  (already present). Action-based: it keys on the certificate-issued event
+  Requires IIS request forwarding from `ca` (index=iis, from the
+  Microsoft-IIS-Logging/Logs ETW channel as of 2026-09-30 -- see
+  defense-tooling's splunk_forwarder_windows role and Web Credential Read's
+  how_to_implement for why ETW replaced the buffered W3C files; ca's IIS
+  logging exists specifically for this detection) and 4886/4887 in ca's
+  Security whitelist (already present). Action-based: it keys on the certificate-issued event
   and its transport plus the web-enrollment object served (an authenticated
   POST to /certsrv/certfnsh.asp returning 200), never on a client tool or
   user-agent -- certipy's `-web`, an ntlmrelayx relay to /certsrv, or a
@@ -61,10 +64,9 @@ how_to_implement: >-
   than one. Machine accounts are deliberately NOT excluded (ESC8 commonly
   relays a machine account's NTLM). Residual imprecision: if two different
   source IPs enrolled as the SAME user within the join window, each id would
-  list both IPs -- not a miss, and not expected in this range. NOTE: IIS stamps request time from a HTTP.SYS
-  wall-clock cache latched at boot -- the member-server ForceTimeResyncOnBoot
-  task (cyber-range network_prereqs) keeps ca's boot clock correct so these
-  log lines aren't future-dated out of the scheduled window.
+  list both IPs -- not a miss, and not expected in this range. (The IIS ETW
+  event carries its own timestamp, so the old HTTP.SYS boot-clock latch that
+  future-dated the W3C file lines no longer affects this detection.)
 known_false_positives: >-
   None expected in this range: AD CS web enrollment is not used
   legitimately here (it exists for this detection), so any authenticated
@@ -85,17 +87,15 @@ known_false_positives: >-
   and the CA event share no request identifier.
 throttle: [attacker_ip, id]
 changes_2026_09_30: >-
-  Index-time window like every detection, but one minute further back than
-  the shared `detection_window`: the attacker IP comes from the IIS POST, and
-  IIS lines reach Splunk up to ~60s after the 4887, so this gives the POST an
-  extra minute to be indexed before the 4887 is evaluated. Still one row per
-  Request ID. The IIS join now also keeps a request whose POST it can't find
-  (attacker_ip blank) instead of dropping the alert. Runs every minute over the events indexed in the previous
-  minute (`detection_window`), so an event is evaluated however late it
-  arrives; before this, each run searched the last minute of event time,
-  and anything indexed after its run (Security up to ~50s late, Zeek conn
-  p90 ~1 min) was never evaluated. Each result row is its own alert,
-  throttled for 5m on the `throttle` fields.
+  Now uses the shared `detection_window` like every other detection. It used
+  to run a minute further back to give the IIS POST time to be indexed after
+  the 4887, because IIS access log lines reached Splunk up to ~60s late from
+  HTTP.SYS's file buffer. Since 2026-09-30 ca forwards IIS requests from the
+  Microsoft-IIS-Logging/Logs ETW channel instead of the W3C files, which
+  arrives in ~1s (faster than the 4887 Security event itself), so no extra
+  slack is needed. The IIS join still keeps a request whose POST it can't
+  find (attacker_ip blank) instead of dropping the alert. Each result row is
+  its own alert, throttled for 5m on the `throttle` fields.
 verification:
   date: '2026-09-29'
   method: Live attack execution against the cyberhawks.lab range

@@ -16,28 +16,33 @@ description: >-
   requesting client (`c_ip`); `file` is the path served.
 data_source:
   - >-
-    IIS W3C access log on `web` (`index=iis`, sourcetype `ms:iis:auto`,
-    host=WEB), fields `cs_uri_stem`, `sc_status`, `c_ip`
+    IIS request logging on `web` from the Microsoft-IIS-Logging/Logs ETW
+    channel (`index=iis`, host=WEB), fields `cs_uri_stem`, `sc_status`,
+    `c_ip`
 search: |-
   index=iis host=WEB sc_status=200 (cs_uri_stem="*.bak" OR cs_uri_stem="*.old" OR cs_uri_stem="*.backup" OR cs_uri_stem="*.save" OR cs_uri_stem="*.orig" OR cs_uri_stem="*.config" OR cs_uri_stem="*~") `detection_window`
   | stats values(cs_uri_stem) as file by c_ip
   | rename c_ip as attacker_ip
   | table attacker_ip file
 how_to_implement: >-
-  Requires IIS log forwarding from `web` -- landed in `index=iis` via the
-  `ms:iis:auto` sourcetype with forwarder-side `INDEXED_EXTRACTIONS=w3c`
-  (see defense-tooling's `splunk_forwarder_windows` role; the earlier
-  `ms:iis:default` mis-mapped every field). The match is action-based: it
-  keys on the object served (a config-backup path) and the 200 result, never
-  on a user-agent or client tool. The extension set covers the common
-  config-backup shapes an attacker probes (`.bak`, `.old`, `.backup`,
-  `.save`, `.orig`, bare `.config`, editor `~` files); add more here if the
-  range ever ships a differently-named backup. NOTE: IIS logs request time
-  from a HTTP.SYS-cached wall clock latched at boot -- if `web` cold-boots
-  with a skewed clock the log timestamps land in the future and this
-  scheduled search's `latest=now` window misses them; the member-server
-  `ForceTimeResyncOnBoot` task (cyber-range `network_prereqs`) keeps the boot
-  clock correct so that does not happen.
+  Requires IIS request logging forwarded from `web`. As of 2026-09-30 this
+  comes from IIS's ETW output (the Microsoft-IIS-Logging/Logs event channel),
+  not the W3C log files: HTTP.SYS buffers the files up to ~60s before writing
+  them (confirmed live -- DisableLogBuffering and IIS 10's
+  flushByEntryCountW3CLog do not change this), which added up to a minute of
+  latency, whereas the ETW channel indexes each request in ~1s. cyber-range's
+  detection_logging role sets `logTargetW3C = File,ETW` and enables the
+  channel; defense-tooling's `splunk_forwarder_windows` role forwards it
+  (renderXml, granting the forwarder's account read on the channel). The same
+  `cs_uri_stem`/`sc_status`/`c_ip` fields are extracted from the ETW event as
+  from the old file lines. The match is action-based: it keys on the object
+  served (a config-backup path) and the 200 result, never on a user-agent or
+  client tool. The extension set covers the common config-backup shapes an
+  attacker probes (`.bak`, `.old`, `.backup`, `.save`, `.orig`, bare
+  `.config`, editor `~` files); add more here if the range ever ships a
+  differently-named backup. NOTE: because ETW carries the event's own
+  timestamp, the HTTP.SYS boot-clock latch that used to future-date the W3C
+  file lines no longer affects this detection.
 known_false_positives: >-
   None expected -- no legitimate client requests a `.bak`/`.old`/config-backup
   path, and a normal page load (`/Default.aspx`, static assets) never matches
@@ -46,14 +51,10 @@ known_false_positives: >-
   hits over the baseline IIS traffic on `web`.
 throttle: [attacker_ip]
 changes_2026_09_30: >-
-  Index-time window like the rest (was the event-time minute before last,
-  which already allowed for IIS's ~40s delivery lag). Runs every minute
-  over the events indexed in the previous minute (`detection_window`), so
-  an event is evaluated however late it arrives; before this, each run
-  searched the last minute of event time, and anything indexed after its
-  run (Security up to ~50s late, Zeek conn p90 ~1 min) was never
-  evaluated. Each result row is its own alert, throttled for 5m on the
-  `throttle` fields.
+  Now fed by the Microsoft-IIS-Logging/Logs ETW channel instead of the
+  buffered W3C log file, cutting up to ~60s of IIS delivery lag (see
+  how_to_implement). Uses the shared `detection_window`. Each result row is
+  its own alert, throttled for 5m on the `throttle` fields.
 verification:
   date: '2026-09-29'
   method: Live attack execution against the cyberhawks.lab range

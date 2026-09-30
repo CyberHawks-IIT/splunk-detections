@@ -300,23 +300,22 @@ attacker* when several run the same technique in a short window. Three
 mechanisms came out of it; they are now the standard shape for every
 detection and for anything added later.
 
-- **Every detection runs every minute over the events *indexed* in the
-  previous minute, not the last minute of event time.** The base search
-  carries the `` `detection_window` `` macro (`_index_earliest=-2m@m
-  _index_latest=-1m@m`). A scheduled run's `now()` is its scheduled minute,
-  so consecutive runs tile index time with no gap or overlap: every event is
-  evaluated exactly once, however late it lands. This fixes a real,
-  silent miss — the old searches used a `-1m..now` *event-time* window, but
-  Zeek `conn` is written ~1 min after a flow ends (p90 ~1 min index lag) and
-  Security events land up to ~50 s late, so a scan or logon whose events
-  were indexed after its run's window closed was never evaluated by any run.
-  The dispatch window (`dispatch.earliest_time=-4h`, `latest=+5m`, both from
-  `build_app.py`'s `DEFAULT_SCHEDULE`) is only an outer bound on how late an
-  event may arrive and still be seen; `+5m` also tolerates a host clock
-  running a little fast. `build_app.py` supplies the schedule, so a YAML
-  normally has **no `schedule:` block** — add one only to override (e.g.
-  Certificate Request (HTTP) uses a window one minute further back for IIS
-  delivery lag).
+- **Every detection runs over the events *indexed* in a recent window, not
+  the last minute of *event* time.** The base search carries the
+  `` `detection_window` `` macro. This fixes a real, silent miss — the old
+  searches used a `-1m..now` *event-time* window, but Zeek `conn` is written
+  ~1 min after a flow ends and Security events land up to ~50 s late, so a
+  scan or logon whose events were indexed after its run's window closed was
+  never evaluated by any run. **NOTE (superseded 2026-09-30 by "Sub-minute
+  dispatch" below):** the window was originally `-1m@m..@m`, a minute-snapped
+  slice that, dispatched once a minute, tiled index time exactly (every event
+  evaluated exactly once). It is now a rolling `-90s` window dispatched every
+  15 s, so runs overlap and an event is evaluated several times; fire-once is
+  now guaranteed by the throttle, not the window. The dispatch window
+  (`dispatch.earliest_time=-4h`, `latest=+5m`, both from `build_app.py`'s
+  `DEFAULT_SCHEDULE`) is only an outer bound on how late an event may arrive
+  and still be seen. `build_app.py` supplies the schedule, so a YAML normally
+  has **no `schedule:` block**.
 - **One alert per attempt, keyed on identity, via per-result throttling.**
   Each saved search sets `alert.digest_mode = 0` (Splunk fires the action
   once per result row) and `alert.suppress = 1` on the YAML's **`throttle`**
@@ -340,14 +339,15 @@ detection and for anything added later.
   *neighbouring* events to judge it — a burst threshold (scan, spray,
   Kerberoast), a query/reply pair (Name Resolution Poisoning), or a
   two-log pair indexed apart (Service Creation's 4697 in Security + 7045 in
-  System) — can't use the 1-minute `` `detection_window` `` alone. These use
+  System) — can't use the short `` `detection_window` `` alone. These use
   `earliest=-30m latest=+5m` (or `-30m` on the pieces) and the
   `` `in_detection_window(t)` `` macro to fire only when a matching group
-  includes an event indexed in *this* run's minute, so each burst is judged
-  whole, once, when a new event of it arrives — and boundary-straddling
-  bursts that fixed `bucket`s used to split (and drop under threshold) no
-  longer are. Recon burst counts moved from `bucket` to `streamstats
-  time_window=...` (a true sliding window) for the same reason.
+  includes a freshly-indexed event, so each burst is judged whole when a new
+  event of it arrives — and boundary-straddling bursts that fixed `bucket`s
+  used to split (and drop under threshold) no longer are. Recon burst counts
+  moved from `bucket` to `streamstats time_window=...` (a true sliding window)
+  for the same reason. (Under the sub-minute dispatch below, a fresh burst
+  passes this gate on several consecutive runs; the throttle collapses them.)
 - **Shared macros replace the copy-pasted blocks** (`app/default/macros.conf`,
   hand-maintained like `build_app.py`, not generated): `` `detection_window` ``,
   `` `in_detection_window(t)` ``, `` `subject_session` `` (host_key +
@@ -358,6 +358,73 @@ detection and for anything added later.
   mvmap` pairs). Use them instead of re-pasting; they are the accuracy-neutral
   half of the "simplify" answer. The macros are in the app's `default/`, so
   they resolve for the app's own searches with no metadata export.
+
+## Sub-minute dispatch: 15s latency without losing fire-once (2026-09-30)
+
+The user asked to get alerts into Discord faster without sacrificing accuracy
+(still one alert per attempt). Latency was measured end to end and cut at every
+stage. The repo/live state is authoritative; this is the "why".
+
+- **The dominant delay was the once-a-minute scheduler.** Splunk cron can't go
+  below 1 minute, so an event waited 0–60 s (avg ~30 s) for the next run. A
+  small dispatcher now fires every detection every 15 s. It lives with the app
+  (`app/bin/dispatch_detections.py`) and runs as a systemd service on the
+  indexer (`cyberhawks-dispatch`, deployed by defense-tooling's `splunk_indexer`
+  role with a 0600 `local/dispatcher.conf` of REST creds). It POSTs each
+  enabled+scheduled saved search to `saved/searches/<name>/dispatch` with
+  `trigger_actions=1` — the same alert path the scheduler uses, so throttling
+  and the Discord action work identically (verified live). It fires at
+  :15/:30/:45; Splunk's own 1/min cron covers :00 **and stays on as a
+  fallback** — if the dispatcher stops, every detection is still evaluated once
+  a minute.
+- **Fire-once now comes from the throttle, not the window.** The old
+  `-1m@m..@m` window tiled index time exactly-once *because* it ran once a
+  minute. Dispatched every 15 s that no longer holds, so `` `detection_window` ``
+  became a **rolling `_index_earliest=-90s`** (90 > the 60 s fallback gap, so
+  two consecutive 1/min fallback runs overlap and leave no hole). Overlapping
+  runs evaluate each event ~6×; `alert.suppress` on the `throttle` fields
+  collapses those to one alert per attempt. The throttle period (5m) ≫ the 90 s
+  an event stays in the window, so an attempt is never re-alerted after the
+  window rolls past it. Verified live: a port scan and a `Web.config.bak` read
+  each produced exactly one Discord fire (`fired=1` once, then `suppressed=1` on
+  every later run), ~11–13 s after the action. `` `in_detection_window(t)` ``
+  likewise became `t >= now-90s`.
+- **Concurrency.** ~49 searches dispatched at once would overrun the default
+  historical-search cap and an over-cap dispatch *fails* (a detection silently
+  skips that cycle). `app/default/limits.conf` raises `[search]
+  base_max_searches` so the cap is ~90 on the 16-core indexer, and
+  `[scheduler] max_searches_perc = 100` stays. The indexer was resized to **16
+  cores / 16 GB** (Proxmox CT 510; vm-templates `debian-containers.md`), and
+  internal indexes (`_audit`/`_internal`/`_introspection`) got size caps in
+  defense-tooling's `dt_detection_content_indexes.conf` because ~200 runs/min
+  write a lot of audit/scheduler data.
+- **Ingestion delays cut at the source.** (1) **Zeek** UDP/ICMP flows were held
+  for the 1-min `udp/icmp_inactivity_timeout` before conn.log wrote them (~62 s
+  for Ping Sweep, Name Resolution Poisoning, UDP scans); dropped to **5 s**
+  (`zeek_sensor` role's `cyberhawks.zeek`, matching TCP's 5 s close delay).
+  Splitting a long idle flow into two records is harmless — those detections
+  count distinct hosts/ports or pair by timestamp. (2) **SQL** DB Connect polled
+  every 60 s; now **5 s** (`splunk_dbconnect_mssql_poll_interval`; each poll is
+  ~60–90 ms). (3) **IIS** was the worst: HTTP.SYS buffers the W3C log *files*
+  up to ~60 s and **neither `DisableLogBuffering` nor IIS 10's
+  `flushByEntryCountW3CLog` changes that** (both tested live — the earlier note
+  that DisableLogBuffering gave ~5 s was wrong). Fixed by logging IIS requests
+  to **ETW** as well (`logTargetW3C = File,ETW` + enabling the
+  `Microsoft-IIS-Logging/Logs` channel, cyber-range `detection_logging`), which
+  indexes each request in ~1 s; the forwarder now ships that channel instead of
+  the files (defense-tooling web/ca `host_vars`, and the forwarder's service
+  account was granted read on the channel). `DisableLogBuffering` is still set
+  (harmless, keeps the on-host files current). Web Credential Read and
+  Certificate Request (HTTP) consume the ETW events (same `cs_uri_stem`/`c_ip`/
+  … field names); Cert Request (HTTP) dropped its extra-minute window since IIS
+  now beats the 4887.
+- **Latency budget after all this** (event → Discord): Windows/Sysmon/Linux
+  ~15–25 s, IIS ~11 s, Zeek TCP ~15–20 s, Zeek UDP/ICMP ~20–25 s (was ~100 s),
+  SQL ~15–25 s. The floor is now dispatch cadence (≤15 s) + run start/exec
+  (~6–10 s) + the source's own index lag, not the minute scheduler.
+- **Non-SPL changes, so the snapshot cycle is owed** for 510 (cores/limits/
+  dispatcher/db poll), 511 (Zeek timeouts), web and ca (IIS ETW). See the
+  infra-fix snapshot workflow.
 
 ## Status
 
