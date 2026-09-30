@@ -1,6 +1,6 @@
 name: xp_cmdshell Execution
 id: sql-server-xp-cmdshell
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: sql-server
@@ -16,6 +16,8 @@ data_source:
     matching xp_cmdshell
 search: |-
   index=mssql sourcetype=mssql_xe_text sql_text="*xp_cmdshell*" NOT username="svc-sqlmonitor" NOT username="NT SERVICE*"
+  | eval event_epoch=strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z")
+  | where isnotnull(event_epoch) AND _time - event_epoch <= 600
   | eval host=replace(source, "_mssql_xe_text", "")
   | rename username as user, sql_text as command
   | lookup known_range_hosts hostname AS host OUTPUT ip AS host_ip
@@ -52,6 +54,19 @@ known_false_positives: >-
   attack chain), not the original login that got there -- correlate with
   the EXECUTE AS Impersonation detection's output for the true actor
   (`dsmith` in this range's design).
+
+  2026-09-30: selects by ARRIVAL time, and drops re-read history. DB Connect
+  stamps each row with the time it read it (index_time_mode = current), so
+  _time is arrival and the -1m window already means "arrived in the last
+  minute". But when Splunk stops or starts, DB Connect's last/first poll can
+  run while the KV store is down, fail to load its checkpoint, fall back to
+  the 1900 init value and re-read the whole audit/XE history, which then
+  arrives "now" and re-alerted old activity with no attacker IP (no live
+  1433 flow to join; seen at a 01:24 UTC restart). Each row still carries
+  its real SQL-side event_time (UTC), so the search now also requires the
+  row to have arrived within 10 minutes of when it happened (DB Connect's
+  60s poll + SQL flush delay fit well inside that). A replay of anything
+  older is dropped; a real event is alerted once, when it arrives.
 verification:
   date: '2026-09-27'
   reverification_2026_09_29: >-

@@ -1,6 +1,6 @@
 name: Database Credential Read (admin)
 id: web-application-portal-database-read
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: web-application
@@ -19,6 +19,8 @@ data_source:
     access pattern
 search: |-
   index=mssql sourcetype=mssql_xe_text sql_text="*FROM Users*" NOT username="NT SERVICE*"
+  | eval event_epoch=strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z")
+  | where isnotnull(event_epoch) AND _time - event_epoch <= 600
   | where NOT (username="svc-web" AND client_hostname="WEB")
   | eval host=replace(source, "_mssql_xe_text", "")
   | lookup known_range_hosts hostname AS host OUTPUT ip AS host_ip
@@ -65,7 +67,29 @@ known_false_positives: >-
   defense-tooling's splunk_indexer role (checkpoint_key pinned per input and
   a seeded KV checkpoint document). If this starts firing repeatedly on the
   same statement again, check DB Connect's readCount before the SPL.
+
+  2026-09-30: selects by ARRIVAL time, and drops re-read history. DB Connect
+  stamps each row with the time it read it (index_time_mode = current), so
+  _time is arrival and the -1m window already means "arrived in the last
+  minute". But when Splunk stops or starts, DB Connect's last/first poll can
+  run while the KV store is down, fail to load its checkpoint, fall back to
+  the 1900 init value and re-read the whole audit/XE history, which then
+  arrives "now" and re-alerted old activity with no attacker IP (no live
+  1433 flow to join; seen at a 01:24 UTC restart). Each row still carries
+  its real SQL-side event_time (UTC), so the search now also requires the
+  row to have arrived within 10 minutes of when it happened (DB Connect's
+  60s poll + SQL flush delay fit well inside that). A replay of anything
+  older is dropped; a real event is alerted once, when it arrives.
 verification:
+  reverification_2026_09_30_replay: >-
+    Arrival-vs-event-time check. Replayed the 01:24 UTC restart window
+    inline: the previous logic returns the IP-less alert seen in Discord, the
+    new logic returns nothing. A further Splunk restart at 01:34 made DB
+    Connect re-read its full history again; all 25 SQL detection runs after
+    it returned 0 results. Live from john-kali as dsmith against sql1 at
+    01:38:46 (SELECT FROM CyberHawksPortal Users, then EXECUTE AS LOGIN =
+    'sa'): both detections fired once at 01:40, posted to Discord (HTTP 204),
+    attacker_ip=192.168.1.11.
   date: '2026-09-27'
   reverification_2026_09_29: >-
     2026-09-29: added the Attacker-IP field via a Zeek conn.log TCP/1433
