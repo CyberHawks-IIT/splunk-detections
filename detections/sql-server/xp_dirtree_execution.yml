@@ -21,7 +21,11 @@ search: |-
   | rex field=sql_text "xp_dirtree\s+'(?<path>[^']+)'"
   | rename username as user
   | lookup known_range_hosts hostname AS host OUTPUT ip AS host_ip
-  | join type=left host_ip [ search index=zeek sourcetype=zeek:conn id_resp_p=1433 NOT id_orig_h="10.0.10.2" | lookup known_range_hosts ip AS id_orig_h OUTPUT hostname AS src_known | where isnull(src_known) | rename id_resp_h as host_ip | stats latest(id_orig_h) as Source_Network_Address by host_ip ]
+  | join type=left host session_id [ search index=mssql sourcetype=mssql_audit action_id=LGIS earliest=-7d latest=now | eval host=replace(source, "_mssql_audit", ""), login=tostring(floor(strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z"))) . "|" . client_address | stats values(login) as logins by host session_id | eval logins=mvjoin(logins, ";") ]
+  | eval logins=split(logins, ";")
+  | eval prior_logins=mvmap(logins, if(tonumber(mvindex(split(logins, "|"), 0)) <= event_epoch + 1, logins, null()))
+  | eval Source_Network_Address=mvindex(split(mvindex(mvsort(prior_logins), -1), "|"), 1)
+  | eval Source_Network_Address=if(Source_Network_Address="local machine", host_ip, Source_Network_Address)
   | rename Source_Network_Address as attacker_ip
   | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
   | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
@@ -47,6 +51,24 @@ known_false_positives: >-
   row to have arrived within 10 minutes of when it happened (DB Connect's
   60s poll + SQL flush delay fit well inside that). A replay of anything
   older is dropped; a real event is alerted once, when it arrives.
+
+  2026-09-30 (attacker IP, session-based): the attacker IP used to be
+  guessed from Zeek -- the most recent external 1433 connection to the
+  server -- which names the wrong client whenever two are connected at once
+  (and, with a -1m window, usually found none: the row arrives up to a DB
+  Connect poll after the connection). Now exact: SQL Server's own login audit
+  (SUCCESSFUL_LOGIN_GROUP, cyber-range detection_logging) records each
+  login's session_id and client address, and the audit/XE rows carry the
+  session_id of the session that acted. The search takes that server's
+  latest login for the same session_id at or before the event (session_ids
+  are reused only after a session ends, so while it's open the match is
+  unique). A "local machine" login (on the SQL server itself) resolves to the
+  server's own IP. The 7-day login lookback only bounds how long a session
+  may have been open. Events collected before 2026-09-30 01:51 UTC have no
+  session_id, so they resolve no IP. (The subsearch hands `logins` over as
+  one ;-joined string: `join` flattens a multivalue field into a single
+  newline-joined value, which made the first live test pick the wrong
+  login.)
 verification:
   date: '2026-09-27'
   reverification_2026_09_29: >-
