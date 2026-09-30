@@ -1,6 +1,6 @@
 name: 'Lateral Movement: WMI'
 id: lateral-movement-wmi
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: lateral-movement
@@ -16,16 +16,12 @@ data_source:
     Events 4624 (Logon Type 3) on the same target for source-IP attribution
 search: |-
   index=windows sourcetype=XmlWinEventLog EventID=1 ParentImage="*WmiPrvSE.exe"
-  | rename host as target
-  | join type=left target [
-      search index=windows EventCode=4624 Logon_Type=3 Source_Network_Address!="-" Source_Network_Address!="10.0.2.1"
-      | rex field=ComputerName "(?<target>[^.]+)"
-      | stats values(Source_Network_Address) as Source_Network_Address by target
-    ]
+  | eval host_key=lower(host), session_id=lower(LogonId)
+  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Source_Network_Address) as Source_Network_Address by host_key session_id ]
+  | where isnotnull(Source_Network_Address) AND Source_Network_Address!="10.0.2.1"
   | bucket _time span=1m
-  | stats values(User) as user by _time Source_Network_Address target
-  | rename Source_Network_Address as attacker_ip
-  | rename target as host
+  | stats values(User) as user by _time Source_Network_Address host_key
+  | rename Source_Network_Address as attacker_ip, host_key as host
   | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
   | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip host user
@@ -56,6 +52,15 @@ how_to_implement: >-
 known_false_positives: >-
   None observed in a 24h lookback. No legitimate WMI-based remote
   administration tooling runs against this range day to day.
+
+  2026-09-30: attacker IP was wrong by construction. The search took the
+  values() of EVERY network logon (4624 Type 3) to the target host in the
+  window and then split on that field, so every IP that had logged on got
+  its own alert row, whether or not it ran anything over WMI. Now exact:
+  the WMI-spawned process's own Sysmon LogonId is traced to the 4624 that
+  opened that session (host + Logon ID), the same session trace the other
+  detections use. Processes whose session has no network source (e.g.
+  SYSTEM children of WmiPrvSE) are not lateral movement and drop out.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
