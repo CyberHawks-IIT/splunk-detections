@@ -1,7 +1,7 @@
 name: Scheduled Task Creation (Local)
 id: host-persistence-scheduled-task-local
-version: 2
-date: '2026-09-29'
+version: 3
+date: '2026-09-30'
 status: production
 category: host-persistence
 description: >-
@@ -32,6 +32,8 @@ search: |-
   | eval Source_Network_Address=host_ip
   | rename host_key as host, Task_Name as task
   | rename Source_Network_Address as attacker_ip
+  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip host user task
 how_to_implement: >-
   No infra fix needed -- shares its data source with Lateral Movement:

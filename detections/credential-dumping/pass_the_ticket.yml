@@ -1,7 +1,7 @@
 name: Pass-the-Ticket
 id: credential-dumping-pass-the-ticket
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-30'
 status: production
 category: credential-dumping
 description: >-
@@ -24,9 +24,11 @@ search: |-
   | eval already_known=if(isnull(as_ips), 0, if(mvfind(as_ips, id_orig_h)>=0, 1, 0))
   | where already_known=0
   | eval origin=mvindex(as_ips, 0)
+  | lookup known_range_hosts ip AS origin OUTPUT hostname AS origin_name | eval origin=coalesce(origin_name, origin)
   | rename id_orig_h as destination
   | bucket _time span=1m
   | stats values(origin) as origin values(service) as service by _time client destination
+  | eval origin=if(isnull(origin), null(), mvmap(origin, if(match(origin, "^[0-9.]+$") OR like(origin, "%:%"), origin, lower(replace(origin, "\..*$", "")))))
   | table client origin destination service
 how_to_implement: >-
   No infra fix needed for the detection logic itself -- Zeek's

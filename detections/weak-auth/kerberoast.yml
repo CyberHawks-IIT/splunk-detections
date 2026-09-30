@@ -1,7 +1,7 @@
 name: Kerberoast
 id: weak-auth-kerberoast
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-30'
 status: production
 category: weak-auth
 description: >-
@@ -28,6 +28,7 @@ search: |-
   | stats values(Service_Name) as users dc(Service_Name) as distinct_services values(encryption) as encryption values(Ticket_Encryption_Type) as raw_enc by _time Client_Address
   | where distinct_services>=2 OR like(raw_enc,"%0x17%")
   | rename Client_Address as attacker_ip
+  | eval users=if(isnull(users), null(), mvmap(users, replace(replace(users, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip users encryption
 how_to_implement: >-
   Requires defense-tooling's Windows forwarder shipping Security log 4769

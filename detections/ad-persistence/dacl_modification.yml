@@ -1,7 +1,7 @@
 name: DACL Modification
 id: ad-persistence-dacl-modification
-version: 2
-date: '2026-09-29'
+version: 3
+date: '2026-09-30'
 status: production
 category: ad-persistence
 description: >-
@@ -31,6 +31,7 @@ search: |-
   | stats values(descriptor) as descriptor values(Source_Network_Address) as Source_Network_Address by _time user DN
   | rename DN as target
   | rename Source_Network_Address as attacker_ip
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip user target descriptor
 how_to_implement: >-
   No new infra fix needed -- the only object SACL in this range covering

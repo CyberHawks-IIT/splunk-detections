@@ -1,7 +1,7 @@
 name: SMB Anonymous Object Enumeration
 id: weak-auth-smb-anonymous-object-enumeration
-version: 2
-date: '2026-09-29'
+version: 3
+date: '2026-09-30'
 status: production
 category: weak-auth
 description: >-
@@ -32,6 +32,7 @@ search: |-
   | stats values(objects) as objects values(method) as method by _time src host
   | rename src as Source_Network_Address
   | rename Source_Network_Address as attacker_ip
+  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
   | table attacker_ip host method objects
 how_to_implement: >-
   Requires defense-tooling's Zeek sensor forwarding dce_rpc.log (already

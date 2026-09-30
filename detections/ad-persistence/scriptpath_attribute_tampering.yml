@@ -1,7 +1,7 @@
 name: ScriptPath Attribute Tampering
 id: ad-persistence-scriptpath-attribute-tampering
-version: 2
-date: '2026-09-29'
+version: 3
+date: '2026-09-30'
 status: production
 category: ad-persistence
 description: >-
@@ -30,6 +30,7 @@ search: |-
   | stats values(value) as value values(Source_Network_Address) as Source_Network_Address by _time DN user
   | rename DN as target
   | rename Source_Network_Address as attacker_ip
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip user target value
 how_to_implement: >-
   Required a real infra fix, matching the DNS Record Creation precedent:

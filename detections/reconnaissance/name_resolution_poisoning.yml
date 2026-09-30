@@ -1,6 +1,6 @@
 name: Name Resolution Poisoning
 id: recon-name-resolution-poisoning
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: reconnaissance
@@ -30,6 +30,8 @@ search: |-
   | rename responder as attacker_ip, querier as target
   | bucket _time span=1m
   | stats values(protocol) as protocols by _time attacker_ip target
+  | lookup known_range_hosts ip AS target OUTPUT hostname AS target_name | eval target=coalesce(target_name, target)
+  | eval target=if(isnull(target), null(), mvmap(target, if(match(target, "^[0-9.]+$") OR like(target, "%:%"), target, lower(replace(target, "\..*$", "")))))
   | table attacker_ip target protocols
 how_to_implement: >-
   Required a real, significant infra fix, not just a config tweak:

@@ -1,7 +1,7 @@
 name: Database Credential Read (admin)
 id: web-application-portal-database-read
-version: 2
-date: '2026-09-29'
+version: 3
+date: '2026-09-30'
 status: production
 category: web-application
 description: >-
@@ -27,6 +27,7 @@ search: |-
   | stats values(Source_Network_Address) as Source_Network_Address by _time username
   | rename username as user
   | rename Source_Network_Address as attacker_ip
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip user
 how_to_implement: >-
   No infra fix needed for the detection itself -- the `detection_sql_text`

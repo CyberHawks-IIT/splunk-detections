@@ -1,7 +1,7 @@
 name: DPAPI Dump
 id: dpapi-dump
-version: 2
-date: '2026-09-29'
+version: 3
+date: '2026-09-30'
 status: production
 category: credential-dumping
 description: >-
@@ -24,6 +24,8 @@ search: |-
   | stats count values(Object_Name) as files values(Source_Network_Address) as Source_Network_Address by _time ComputerName Account_Name
   | rename ComputerName as host, Account_Name as user
   | rename Source_Network_Address as attacker_ip
+  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip host user files
 how_to_implement: >-
   Requires the file-system SACL on the Protect and Credentials folders

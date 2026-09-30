@@ -1,7 +1,7 @@
 name: Ping Sweep
 id: recon-ping-sweep
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-30'
 status: production
 category: reconnaissance
 description: >-
@@ -11,9 +11,12 @@ data_source:
 search: |-
   index=zeek sourcetype=zeek:conn proto=icmp
   | bucket _time span=10s
-  | stats dc(id_resp_h) as distinct_hosts values(id_resp_h) as hosts by _time id_orig_h
+  | lookup known_range_hosts ip AS id_resp_h OUTPUT hostname AS resp_name
+  | eval resp_host=coalesce(resp_name, id_resp_h)
+  | stats dc(id_resp_h) as distinct_hosts values(resp_host) as hosts by _time id_orig_h
   | where distinct_hosts>=5
   | rename id_orig_h as attacker_ip
+  | eval hosts=if(isnull(hosts), null(), mvmap(hosts, if(match(hosts, "^[0-9.]+$") OR like(hosts, "%:%"), hosts, lower(replace(hosts, "\..*$", "")))))
   | table attacker_ip hosts
 how_to_implement: >-
   Requires defense-tooling's Zeek sensor forwarding conn.log, plus this

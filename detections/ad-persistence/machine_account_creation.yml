@@ -1,7 +1,7 @@
 name: Machine Account Creation
 id: ad-persistence-machine-account-creation
-version: 2
-date: '2026-09-29'
+version: 3
+date: '2026-09-30'
 status: production
 category: ad-persistence
 description: >-
@@ -25,6 +25,7 @@ search: |-
   | stats values(Subject_Account_Name) as user values(Source_Network_Address) as Source_Network_Address by _time SAM_Account_Name
   | rename SAM_Account_Name as account
   | rename Source_Network_Address as attacker_ip
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip user account
 how_to_implement: >-
   No infra fix needed -- 4741 auditing (Computer Account Management,

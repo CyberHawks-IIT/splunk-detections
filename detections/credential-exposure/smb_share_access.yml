@@ -1,7 +1,7 @@
 name: SMB Share Access
 id: credential-exposure-smb-share-access
-version: 2
-date: '2026-09-28'
+version: 3
+date: '2026-09-30'
 status: production
 category: credential-exposure
 description: >-
@@ -19,6 +19,7 @@ search: |-
   | bucket _time span=1m
   | stats values(share) as share values(ComputerName) as host by _time Source_Address
   | rename Source_Address as attacker_ip
+  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
   | table attacker_ip host share
 how_to_implement: >-
   Same infra fix as NETLOGON Share Read / SYSVOL Share Read -- "Detailed

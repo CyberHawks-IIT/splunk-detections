@@ -1,7 +1,7 @@
 name: NTDS.dit Extraction
 id: credential-dumping-ntds-dit-extraction
-version: 1
-date: '2026-09-29'
+version: 2
+date: '2026-09-30'
 status: production
 category: credential-dumping
 description: >-
@@ -31,6 +31,8 @@ search: |-
   | stats values(Account_Name) as user values(Source_Network_Address) as Source_Network_Address by _time host_key
   | rename host_key as host
   | rename Source_Network_Address as attacker_ip
+  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip host user
 how_to_implement: >-
   Requires the file-system SACL on `%SystemRoot%\NTDS\ntds.dit`

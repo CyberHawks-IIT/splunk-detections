@@ -1,7 +1,7 @@
 name: SYSVOL Share Read
 id: credential-exposure-sysvol-share-read
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-30'
 status: production
 category: credential-exposure
 description: >-
@@ -18,6 +18,7 @@ search: |-
   | bucket _time span=1m
   | stats values(Relative_Target_Name) as files values(ComputerName) as host by _time Source_Address
   | rename Source_Address as attacker_ip
+  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
   | table attacker_ip host files
 how_to_implement: >-
   Same infra fix as NETLOGON Share Read -- "Detailed File Share" auditing

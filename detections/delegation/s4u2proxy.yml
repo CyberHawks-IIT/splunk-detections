@@ -1,7 +1,7 @@
 name: 'Delegation: S4U2Proxy'
 id: delegation-s4u2proxy
-version: 1
-date: '2026-09-29'
+version: 2
+date: '2026-09-30'
 status: production
 category: delegation
 description: >-
@@ -37,6 +37,8 @@ search: |-
       | stats values(imp) as impersonated values(eval(if(like(service,"%/%"),service,null()))) as service_spn by tkey ]
   | eval service=coalesce(service_spn, service)
   | stats values(attacker_ip) as attacker_ip values(user) as user values(impersonated) as impersonated by logon_guid service
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | eval impersonated=if(isnull(impersonated), null(), mvmap(impersonated, replace(replace(impersonated, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip user service impersonated
 how_to_implement: >-
   No infra fix needed -- 4769 from the DCs is already forwarded, and Zeek's

@@ -1,7 +1,7 @@
 name: DNS Record Creation
 id: ntlm-dns-record-creation
-version: 2
-date: '2026-09-29'
+version: 3
+date: '2026-09-30'
 status: production
 category: ntlm
 description: >-
@@ -26,6 +26,7 @@ search: |-
   | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
   | eval Source_Network_Address=coalesce(logon_src, host_ip)
   | rename Source_Network_Address as attacker_ip
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip user name
 how_to_implement: >-
   Required a real infra fix, bigger than the credential-exposure category's

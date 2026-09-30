@@ -1,7 +1,7 @@
 name: NetNTLMv1 Authentication
 id: weak-auth-netntlmv1
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-30'
 status: production
 category: weak-auth
 description: >-
@@ -22,6 +22,8 @@ search: |-
   | where target_user!="-" AND target_user!="ANONYMOUS LOGON" AND NOT match(target_user, "\$$")
   | rename Source_Network_Address as ip, ComputerName as host, target_user as user
   | rename ip as attacker_ip
+  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip host user
 how_to_implement: >-
   Requires defense-tooling's Windows forwarder shipping Security log 4624

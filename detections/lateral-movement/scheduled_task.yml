@@ -1,7 +1,7 @@
 name: 'Lateral Movement: Scheduled Task'
 id: lateral-movement-scheduled-task
-version: 2
-date: '2026-09-29'
+version: 3
+date: '2026-09-30'
 status: production
 category: lateral-movement
 description: >-
@@ -30,6 +30,8 @@ search: |-
   | stats values(Subject_Account_Name) as user by _time src host_key Task_Name
   | rename src as Source_Network_Address, host_key as host, Task_Name as task
   | rename Source_Network_Address as attacker_ip
+  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip host user task
 how_to_implement: >-
   No infra fix needed -- 4698/4624 were already forwarded and used by

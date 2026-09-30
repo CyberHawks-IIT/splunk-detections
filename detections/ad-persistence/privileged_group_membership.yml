@@ -1,7 +1,7 @@
 name: Privileged Group Membership
 id: ad-persistence-privileged-group-membership
-version: 2
-date: '2026-09-29'
+version: 3
+date: '2026-09-30'
 status: production
 category: ad-persistence
 description: >-
@@ -28,6 +28,7 @@ search: |-
   | bucket _time span=1m
   | stats values(Subject_Account_Name) as user values(Source_Network_Address) as Source_Network_Address by _time Group_Name target type
   | rename Source_Network_Address as attacker_ip
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip user type target
 how_to_implement: >-
   Required a real infra fix: 4728/4732/4756 (the "add member" events) were

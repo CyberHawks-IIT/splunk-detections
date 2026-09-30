@@ -1,7 +1,7 @@
 name: WMI Event Subscription Creation
 id: host-persistence-wmi-event-subscription
-version: 2
-date: '2026-09-29'
+version: 3
+date: '2026-09-30'
 status: production
 category: host-persistence
 description: >-
@@ -21,6 +21,8 @@ search: |-
   | eval host_key=lower(host)
   | lookup known_range_hosts hostname AS host_key OUTPUT ip AS Source_Network_Address
   | rename Source_Network_Address as attacker_ip
+  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip host user producer consumer binding
 how_to_implement: >-
   No infra fix needed -- Sysmon's `WmiEvents` rule group in

@@ -1,7 +1,7 @@
 name: EXECUTE AS Impersonation
 id: sql-server-execute-as-impersonation
-version: 2
-date: '2026-09-29'
+version: 3
+date: '2026-09-30'
 status: production
 category: sql-server
 description: >-
@@ -25,6 +25,9 @@ search: |-
   | bucket _time span=1m
   | stats values(impersonated) as impersonated values(Source_Network_Address) as Source_Network_Address by _time host user
   | rename Source_Network_Address as attacker_ip
+  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | eval impersonated=if(isnull(impersonated), null(), mvmap(impersonated, replace(replace(impersonated, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip host user impersonated
 how_to_implement: >-
   Requires defense-tooling's DB Connect setup already forwarding

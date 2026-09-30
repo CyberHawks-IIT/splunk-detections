@@ -1,7 +1,7 @@
 name: Certificate Request (HTTP)
 id: adcs-certificate-request-http
-version: 1
-date: '2026-09-29'
+version: 2
+date: '2026-09-30'
 status: production
 category: adcs
 description: >-
@@ -37,6 +37,7 @@ search: |-
     ]
   | stats values(Source_Network_Address) as Source_Network_Address values(user) as user values(Certificate_Template) as template by id
   | rename Source_Network_Address as attacker_ip
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip user template id
 how_to_implement: >-
   Requires IIS log forwarding from `ca` (index=iis, ms:iis:auto -- see

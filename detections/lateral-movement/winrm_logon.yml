@@ -1,7 +1,7 @@
 name: 'Lateral Movement: WinRM'
 id: lateral-movement-winrm
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-30'
 status: production
 category: lateral-movement
 description: >-
@@ -25,6 +25,8 @@ search: |-
   | bucket _time span=1m
   | stats count by _time Source_Network_Address host user
   | rename Source_Network_Address as attacker_ip
+  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip host user
 how_to_implement: >-
   No infra fix needed -- the WinRM Operational channel was already

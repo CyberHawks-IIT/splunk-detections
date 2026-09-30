@@ -1,7 +1,7 @@
 name: Zone Transfer
 id: weak-auth-zone-transfer
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-30'
 status: production
 category: weak-auth
 description: >-
@@ -18,6 +18,8 @@ search: |-
   index=zeek sourcetype=zeek:dns qtype_name=AXFR
   | rename id_resp_h as host
   | rename id_orig_h as attacker_ip
+  | lookup known_range_hosts ip AS host OUTPUT hostname AS host_name | eval host=coalesce(host_name, host)
+  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
   | table attacker_ip host
 how_to_implement: >-
   Requires defense-tooling's Zeek sensor forwarding dns.log (already

@@ -129,6 +129,18 @@ scoped to source IP + the planner's fields) came out of this same pass.
   embed description is "Full Name (attacker_ip)", resolved on the indexer
   from defense-tooling's Proxmox-derived attacker directory (see its
   `docs/discord-alerting.md`), so `attacker_ip` must be a raw source IP.
+  **Host and user values are normalized (2026-09-30):** every host-valued
+  output (`host`, `hosts`, Name Resolution Poisoning's `target`,
+  Pass-the-Ticket's `origin`) is the short, lowercase hostname (`dc1`, not
+  `DC1.cyberhawks.lab` or `WEB`), with range IPs mapped to names via
+  `known_range_hosts` (non-range IPs stay IPs). Every user-valued output
+  (`user`, `users`, `impersonated`, `successes`) is the bare account name
+  (`dsmith`, not `CYBERHAWKS\dsmith` or `dsmith@cyberhawks.lab`; machine
+  accounts keep their `$`). Each search does this in a standard `eval ...
+  mvmap(...)` pair just before its final `| table`; copy it from any
+  existing detection. `attacker_ip` always stays a raw IP (it's the Discord
+  lookup key), and AD object DNs (`target` on DACL/RBCD/Shadow Credential)
+  are left as DNs.
 - **Zeek fields in SPL use underscores, not the dotted Zeek/CIM
   convention.** `id.orig_h`, `id.resp_h`, `id.resp_p`, etc. as written in
   this file's prose (and in Zeek's own docs) are `id_orig_h`, `id_resp_h`,

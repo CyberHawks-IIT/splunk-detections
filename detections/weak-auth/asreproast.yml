@@ -1,7 +1,7 @@
 name: AS-REP Roast
 id: weak-auth-asreproast
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-30'
 status: production
 category: weak-auth
 description: >-
@@ -21,6 +21,7 @@ search: |-
   | bucket _time span=1m
   | stats values(Account_Name) as users by _time Client_Address
   | rename Client_Address as attacker_ip
+  | eval users=if(isnull(users), null(), mvmap(users, replace(replace(users, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip users
 how_to_implement: >-
   Requires defense-tooling's Windows forwarder shipping Security log 4768

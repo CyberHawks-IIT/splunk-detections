@@ -1,7 +1,7 @@
 name: Event Log Clear
 id: defense-evasion-event-log-clear
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-30'
 status: production
 category: defense-evasion
 description: >-
@@ -13,18 +13,29 @@ description: >-
   management.
 data_source:
   - >-
-    Windows Events -- 1102 (audit log cleared, Security log specifically,
-    resolved account name) merged with System log 104 (any log cleared,
-    raw SID only) by host and time, so one alert covers every log a single
-    clear action touched
+    Windows Events -- 1102 (Security log cleared: subject account + Logon
+    ID) and System 104 (any other log cleared: subject SID only), merged by
+    host and minute so one alert covers every log a single clear touched
+  - Windows Event 4624 (the remote logon that opened the clearing session),
+    for attacker_ip
 search: |-
   index=windows (EventCode=1102 OR EventCode=104)
-  | rex field=_raw "The (?<logcleared>\S+) log file was cleared"
+  | rex field=_raw "The (?<logcleared>.+?) log file was cleared"
   | eval logcleared=coalesce(logcleared, if(EventCode=1102, "Security", null()))
   | rex field=ComputerName "(?<host>[^.]+)"
+  | eval host_key=lower(host)
+  | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
+  | rex field=_raw "Security ID:\s+(?<subject_sid>S-[0-9-]+)"
+  | eval session_id=lower(session_id), sid=coalesce(Sid, subject_sid)
+  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Source_Network_Address) as session_src by host_key session_id ]
+  | join type=left host_key sid [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), sid=mvindex(Security_ID,-1), sid_user=mvindex(Account_Name,-1) | stats latest(Source_Network_Address) as sid_src latest(sid_user) as sid_user by host_key sid ]
+  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
+  | eval attacker_ip=coalesce(session_src, sid_src, host_ip), user=coalesce(Account_Name, sid_user)
   | bucket _time span=1m
-  | stats values(logcleared) as logs values(Account_Name) as user by _time host
-  | table host user logs
+  | stats values(attacker_ip) as attacker_ip values(user) as user values(logcleared) as logs by _time host
+  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | table attacker_ip host user logs
 how_to_implement: >-
   No infra fix needed -- both event types were already forwarded (1102 in
   the Security whitelist, 104 in the System whitelist). **Real design
@@ -52,8 +63,32 @@ how_to_implement: >-
 known_false_positives: >-
   This project's own pre-snapshot log-clear workflow, expected and
   intentional -- see how_to_implement.
+
+  v2 (2026-09-30): attacker_ip added (it had none, so Discord could only
+  say "Unknown"). 1102 carries the clearer's Logon ID, joined to the 4624
+  that opened that session (its Source_Network_Address), the same trace
+  the other detections use. 104 has no Logon ID, only the subject SID, so
+  a 104-only clear falls back to the latest remote 4624 for that SID on
+  that host in the last hour (weaker: a user with two remote sessions on
+  the host could be attributed to the other one). The SID join also fills
+  `user` for 104-only clears, closing the old "104 never resolves an
+  account name" gap above. A clear with no network logon behind it (e.g.
+  SYSTEM via the guest agent, which is what the snapshot workflow does)
+  falls back to the host's own IP, the same convention as the other
+  detections. Also fixed: log names containing spaces (e.g.
+  "Microsoft-Windows-Windows Defender/Operational") never matched the
+  `logs` regex. `host` added to the embed.
 verification:
   date: '2026-09-27'
+  reverification_2026_09_30: >-
+    Live from john-kali (192.168.1.11), netexec WinRM as
+    CYBERHAWKS\Administrator against workstation: (A) wevtutil cl
+    Application alone -> only a 104, attributed via the SID fallback:
+    attacker_ip=192.168.1.11, user=Administrator, logs=Application. (B)
+    Application + Security a minute later -> 104 + 1102 (Logon ID
+    0x18ED553), attributed via the session trace: attacker_ip=192.168.1.11,
+    user=Administrator, logs="Application Security". The earlier SYSTEM
+    clears from the snapshot workflow resolve to each host's own IP.
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: WinRM from the control host, as domain admin (simulating an attacker who has already achieved local admin and is covering their tracks)
   technique: 'wevtutil cl Application, then wevtutil cl Security, on workstation'
@@ -64,6 +99,7 @@ verification:
 embed:
   title: Event Log Clear
   additional_fields:
+    - host
     - user
     - logs
 references:

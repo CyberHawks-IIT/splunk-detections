@@ -1,6 +1,6 @@
 name: Port Scan
 id: recon-port-scan
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: reconnaissance
@@ -13,9 +13,12 @@ search: |-
   index=zeek sourcetype=zeek:conn (proto=tcp OR proto=udp) id_resp_h=10.0.2.* NOT id_resp_p=123 NOT id_orig_h=10.0.2.1
   | where isnull(history) OR (substr(history,1,1)!="H" AND NOT (match(history,"^[Cc]+$") AND id_resp_p>=49152))
   | bucket _time span=30s
-  | stats dc(id_resp_p) as distinct_ports dc(id_resp_h) as distinct_hosts values(id_resp_h) as hosts values(id_resp_p) as ports values(proto) as protocol by _time id_orig_h
+  | lookup known_range_hosts ip AS id_resp_h OUTPUT hostname AS resp_name
+  | eval resp_host=coalesce(resp_name, id_resp_h)
+  | stats dc(id_resp_p) as distinct_ports dc(id_resp_h) as distinct_hosts values(resp_host) as hosts values(id_resp_p) as ports values(proto) as protocol by _time id_orig_h
   | where distinct_ports>=15 OR distinct_hosts>=6
   | rename id_orig_h as attacker_ip
+  | eval hosts=if(isnull(hosts), null(), mvmap(hosts, if(match(hosts, "^[0-9.]+$") OR like(hosts, "%:%"), hosts, lower(replace(hosts, "\..*$", "")))))
   | table attacker_ip hosts protocol ports
 how_to_implement: >-
   Requires defense-tooling's Zeek sensor forwarding conn.log, plus this

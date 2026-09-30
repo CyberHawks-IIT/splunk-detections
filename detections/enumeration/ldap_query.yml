@@ -1,6 +1,6 @@
 name: LDAP Query
 id: enumeration-ldap-query
-version: 4
+version: 5
 date: '2026-09-30'
 status: production
 category: enumeration
@@ -58,6 +58,9 @@ search: |-
   | bucket _time span=1m
   | stats values(user) as user values(query) as query by _time Source_Network_Address host protocol
   | rename Source_Network_Address as attacker_ip
+  | lookup known_range_hosts ip AS host OUTPUT hostname AS host_name | eval host=coalesce(host_name, host)
+  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
+  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
   | table attacker_ip host protocol user query
 how_to_implement: >-
   **1644 must log every search, and the thresholds must be 1, not 0.**
