@@ -400,10 +400,19 @@ stage. The repo/live state is authoritative; this is the "why".
   write a lot of audit/scheduler data.
 - **Ingestion delays cut at the source.** (1) **Zeek** UDP/ICMP flows were held
   for the 1-min `udp/icmp_inactivity_timeout` before conn.log wrote them (~62 s
-  for Ping Sweep, Name Resolution Poisoning, UDP scans); dropped to **5 s**
-  (`zeek_sensor` role's `cyberhawks.zeek`, matching TCP's 5 s close delay).
-  Splitting a long idle flow into two records is harmless — those detections
-  count distinct hosts/ports or pair by timestamp. (2) **SQL** DB Connect polled
+  for Ping Sweep, Name Resolution Poisoning, UDP scans); dropped to 5 s, then
+  (same day, second pass) **all** of Zeek's flow-end holds — UDP/ICMP
+  inactivity plus TCP's unanswered-SYN, RST and FIN-close delays, 5 s each by
+  default — went to **1 s**, and `Log::flush_interval` 1 s → 250 ms
+  (`zeek_sensor` role's `cyberhawks.zeek`). Measured with the same john-kali
+  scan before/after: index lag TCP S0 5.8 → 2.3 s, ICMP 7.0 → 3.1 s; Port Scan
+  posted 10.9 → 5.0 s after the scan, Ping Sweep 10.7 → 4.7 s. Record volume
+  was unchanged (~60 TCP flows/min background). Splitting a flow with a >1 s
+  gap into two records is harmless — those detections count distinct
+  hosts/ports or pair by timestamp. An open-time log (like `conn_open`) was
+  considered for scans and rejected: `connection_established` never fires for
+  the closed/filtered ports that make up most of a scan, and Port Scan's
+  `history` filters need the finished flow. (2) **SQL** DB Connect polled
   every 60 s; now **5 s** (`splunk_dbconnect_mssql_poll_interval`; each poll is
   ~60–90 ms). (3) **IIS** was the worst: HTTP.SYS buffers the W3C log *files*
   up to ~60 s and **neither `DisableLogBuffering` nor IIS 10's
@@ -419,9 +428,14 @@ stage. The repo/live state is authoritative; this is the "why".
   … field names); Cert Request (HTTP) dropped its extra-minute window since IIS
   now beats the 4887.
 - **Latency budget after all this** (event → Discord): Windows/Sysmon/Linux
-  ~15–25 s, IIS ~11 s, Zeek TCP ~15–20 s, Zeek UDP/ICMP ~20–25 s (was ~100 s),
-  SQL ~15–25 s. The floor is now dispatch cadence (≤15 s) + run start/exec
-  (~6–10 s) + the source's own index lag, not the minute scheduler.
+  ~15–25 s, IIS ~11 s, Zeek conn (TCP/UDP/ICMP) ~5–20 s (was ~100 s for
+  UDP/ICMP), SQL ~15–25 s. The floor is now dispatch cadence (≤15 s) + run
+  start/exec + the source's own index lag, not the minute scheduler.
+- **Discord embeds escape markdown.** Field values and the attacker line are
+  backslash-escaped by defense-tooling's `discord_alert.py`, so event data like
+  an LDAP filter `(cn=*svc_*)` shows literally instead of turning into italics
+  (2026-09-30). Titles and field names are ours and stay unescaped — don't put
+  markdown characters in a saved-search name or output-column name.
 - **Non-SPL changes, so the snapshot cycle is owed** for 510 (cores/limits/
   dispatcher/db poll), 511 (Zeek timeouts), web and ca (IIS ETW). See the
   infra-fix snapshot workflow.
