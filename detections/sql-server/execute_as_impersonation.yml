@@ -44,6 +44,14 @@ known_false_positives: >-
   matches in 24h are all real: this session's 2 live tests plus 3 from an
   earlier session's own build-verification pass (also dsmith -> sa),
   correctly deduplicated per-minute rather than one alert per statement.
+
+  INGESTION FALSE POSITIVE (fixed 2026-09-30, not a logic issue): this fired
+  every minute because DB Connect never persisted its rising-column
+  checkpoint for the conf-written inputs, re-reading every audit/XE row since
+  1900 on each poll and re-indexing it at the current time. Fixed in
+  defense-tooling's splunk_indexer role (checkpoint_key pinned per input and
+  a seeded KV checkpoint document). If this starts firing repeatedly on the
+  same statement again, check DB Connect's readCount before the SPL.
 verification:
   date: '2026-09-27'
   reverification_2026_09_29: >-

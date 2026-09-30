@@ -1,7 +1,7 @@
 name: LDAP Query
 id: enumeration-ldap-query
-version: 3
-date: '2026-09-29'
+version: 4
+date: '2026-09-30'
 status: production
 category: enumeration
 description: >-
@@ -28,6 +28,7 @@ data_source:
     (Zeek `ts` .. `ts`+`duration`, +/-2s) for ADWS's loopback 1644s
 search: |-
   index=zeek sourcetype=zeek:conn (id_resp_p=389 OR id_resp_p=636 OR id_resp_p=9389)
+  | where match(history, "D") OR match(history, "^[Cc]+$")
   | lookup known_range_hosts ip AS id_orig_h OUTPUT hostname
   | where isnull(hostname)
   | eval protocol=case(id_resp_p=389, "ldap", id_resp_p=636, "ldaps", id_resp_p=9389, "adws")
@@ -103,7 +104,24 @@ known_false_positives: >-
   (the alert itself still only fires for the outside IP). Revisit if a
   legitimate non-domain-joined LDAP/ADWS client (a vulnerability scanner, a
   monitoring agent) is ever added to this range.
+
+  2026-09-30: an ordinary TCP port scan (nmap -p 1-1000 from john-kali
+  against workstation, not even a DC) fired this for ldap and ldaps with no
+  user or query: any SYN from a non-range host to 389/636 matched. Now the
+  client must have actually sent data (Zeek history contains an uppercase
+  "D"), which every LDAP bind/search does and a scan probe never does.
+  Checksum-only flows (history all "C"/"c", typical of same-vnet mirrored
+  taps where Zeek can't parse flags) are kept so an attacker on the ad vnet
+  is not missed.
 verification:
+  reverification_2026_09_30: >-
+    History-filter change, replayed inline over all ~7h of data since boot
+    (with the 1644 subsearch windows widened to match): the old logic
+    returned the nmap scan's SYN probes to workstation 389/636 (no user, no
+    query) plus the real queries; the new logic returns only the real
+    queries. Live from john-kali: ldapsearch as dsmith over ldap:// and
+    ldaps:// to dc1, filter (servicePrincipalName=*), both reported with
+    user dsmith@cyberhawks.lab and the full filter.
   date: '2026-09-29'
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: john-kali (VM 611, 192.168.1.11) for LDAP/LDAPS; john-windows (VM 610, 192.168.1.10) for ADWS

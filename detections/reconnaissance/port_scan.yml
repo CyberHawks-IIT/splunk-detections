@@ -1,7 +1,7 @@
 name: Port Scan
 id: recon-port-scan
-version: 1
-date: '2026-09-27'
+version: 2
+date: '2026-09-30'
 status: production
 category: reconnaissance
 description: >-
@@ -10,7 +10,8 @@ description: >-
 data_source:
   - Zeek conn.log (proto=tcp or udp)
 search: |-
-  index=zeek sourcetype=zeek:conn (proto=tcp OR proto=udp) id_resp_h=10.0.2.* NOT id_resp_p=123
+  index=zeek sourcetype=zeek:conn (proto=tcp OR proto=udp) id_resp_h=10.0.2.* NOT id_resp_p=123 NOT id_orig_h=10.0.2.1
+  | where isnull(history) OR (substr(history,1,1)!="H" AND NOT (match(history,"^[Cc]+$") AND id_resp_p>=49152))
   | bucket _time span=30s
   | stats dc(id_resp_p) as distinct_ports dc(id_resp_h) as distinct_hosts values(id_resp_h) as hosts values(id_resp_p) as ports values(proto) as protocol by _time id_orig_h
   | where distinct_ports>=15 OR distinct_hosts>=6
@@ -32,6 +33,26 @@ known_false_positives: >-
   "Monitoring rollout plan" section), which also tripped the distinct_hosts
   threshold -- excluded via NOT id_resp_p=123. No false positives found over
   2h of normal range background traffic once both fixes were in place.
+  v2 (2026-09-30, found while enabling Discord alerting; this fired about
+  every 30s): Zeek often records a long-lived session mid-stream with the
+  direction reversed, so the SERVER shows up as a source hitting many
+  clients' ephemeral ports. Three separate cases, each fixed at its cause:
+  (1) the Splunk indexer (10.0.10.2) "scanning" all 7 range hosts, really
+  their forwarders' 9997 sessions, where Zeek's first packet was the
+  indexer's SYN-ACK (history starts with "H"). A scanner never opens with a
+  SYN-ACK, so H-first flows are dropped (case-sensitive: lowercase "h" is a
+  different event). (2) dc1/dc2 "scanning" a client's ephemeral ports.
+  On same-vnet mirrored taps, checksum offload leaves Zeek only
+  bad-checksum packets (history all "C"/"c"), so it can't see flags or
+  direction. For those flows only, targets in the ephemeral range
+  (>=49152) are ignored, since a reversed server-to-client flow always lands
+  on a client's ephemeral port while a scan targets service ports. Flows
+  with valid packets keep every port. (3) The range gateway 10.0.2.1
+  sweeping WinRM (5985) on all hosts: management traffic NATed by pfSense
+  (Ansible/WinRM during maintenance). Attackers route through pfSense with
+  their own source IP preserved, so no attacker appears as 10.0.2.1.
+  Replayed over the full ~5h of data since boot, v2 fires only on the
+  deliberate john-kali scan.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
