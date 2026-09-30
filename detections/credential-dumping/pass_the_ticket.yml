@@ -1,15 +1,18 @@
 name: Pass-the-Ticket
 id: credential-dumping-pass-the-ticket
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: credential-dumping
 description: >-
-  A Kerberos service ticket (TGS-REQ) requested from an IP that has never
-  itself been observed performing the initial authentication (AS-REQ) for
-  that same client principal -- the signature of a stolen/copied TGT (or
-  TGS) being reused from a second host rather than the one that originally
-  obtained it.
+  A Kerberos service ticket (TGS-REQ) requested from an IP that did not
+  itself perform the initial authentication (AS-REQ) for that same client
+  principal, WHEN that AS-REQ was positively observed from a different host
+  -- the signature of a stolen/copied TGT (or TGS) being reused from a
+  second host rather than the one that originally obtained it. Firing
+  requires seeing the original AS-REQ from another IP; a TGS-REQ for a
+  principal whose AS-REQ was never observed is not treated as reuse (it is
+  almost always an un-captured or pre-lookback TGT, not an attack).
 data_source:
   - >-
     Zeek `kerberos.log` -- TGS-REQ events whose source IP is absent from the
@@ -17,12 +20,14 @@ data_source:
     within a 1-day lookback
 search: |-
   index=zeek sourcetype=zeek:kerberos request_type=TGS service!="krbtgt/*" `detection_window`
-  | join type=left client [
+  | eval ckey=lower(replace(client,"[/@].*",""))
+  | join type=left ckey [
       search index=zeek sourcetype=zeek:kerberos request_type=AS earliest=-1d latest=+5m
-      | stats values(id_orig_h) as as_ips by client
+      | eval ckey=lower(replace(client,"[/@].*",""))
+      | stats values(id_orig_h) as as_ips by ckey
     ]
   | eval already_known=if(isnull(as_ips), 0, if(mvfind(as_ips, id_orig_h)>=0, 1, 0))
-  | where already_known=0
+  | where isnotnull(as_ips) AND already_known=0
   | eval origin=mvindex(as_ips, 0)
   | lookup known_range_hosts ip AS origin OUTPUT hostname AS origin_name | eval origin=coalesce(origin_name, origin)
   | rename id_orig_h as destination
@@ -30,58 +35,48 @@ search: |-
   | `normalize_host(origin)`
   | table client origin destination service
 how_to_implement: >-
-  No infra fix needed for the detection logic itself -- Zeek's
-  `kerberos.log` and its `request_type`/`client`/`service`/`id_orig_h`
-  fields were already forwarded and extracted correctly (this project's
-  existing `zeek_kerberos_fields` extraction, set up in an earlier
-  session). **Real infra finding hit while designing the live test, not
-  fixed (see known_false_positives/notes below):** the originally-planned
-  test technique -- request a TGT on john-kali, copy the ccache to the
-  `test` box (10.0.2.10, same `ad` vnet as the DCs), and request a service
-  ticket from there -- produced connections that Zeek's `conn.log` shows
-  with `conn_state=OTH` and `service=-` (protocol detection failure) for
-  ANY guest-to-guest traffic on the `ad` vnet (confirmed not test-specific:
-  workstation's routine Kerberos traffic to dc1 shows the same OTH
-  classification), so no `kerberos.log` entry is ever produced for
-  same-vnet inter-guest traffic at all. This is very likely a side effect
-  of 2026-09-27's earlier per-guest vnet-mirroring fix (mirror-vnet-guests.sh)
-  double-capturing same-vnet flows from both peers' own mirrored taps,
-  corrupting Zeek's TCP stream reassembly for protocol analyzers that need
-  a clean stream (kerberos.log, ldap.log, dce_rpc.log) -- conn.log's basic
-  5-tuple/byte-count fields are unaffected, only the deep protocol decode
-  is. **Worked around, not fixed:** tested instead by adding a second IP
-  (192.168.1.199) to john-kali's own interface and a host route for
-  10.0.2.2 via it, requesting the service ticket a second time from that
-  IP -- this still crosses the router (cross-vnet, single capture point via
-  the router's own mirrored tap), avoiding the same-vnet double-capture
-  path entirely, and produced a clean second kerberos.log entry. **This
-  same-vnet decode gap needs a dedicated investigation in
-  defense-tooling/cyber-range before any future detection that specifically
-  requires Zeek-decoded protocol content for traffic BETWEEN TWO RANGE
-  HOSTS** (not from an external attacker box) -- flagged for a future
-  session rather than guessed at further here, matching this project's
-  precedent for the LLMNR/coercion mirroring investigations. Detections
-  relying only on Windows Events (with their own IP fields) or on
-  conn.log's basic metadata are unaffected.
+  No infra fix needed -- Zeek's `kerberos.log` (`request_type`/`client`/
+  `service`/`id_orig_h`) is forwarded and extracted. Same-vnet Kerberos now
+  decodes on every path since the sensor's `ignore_checksums` fix
+  (2026-09-30); before that only router-crossing traffic produced
+  `kerberos.log`, which is why the original test had to be run twice from
+  john-kali (a real second IP on its interface) rather than from a same-vnet
+  host. **Client-principal normalization is essential:** Zeek logs the realm
+  inconsistently between AS and TGS for the same principal (observed live:
+  AS `bsmith/CYBERHAWKS`, TGS `bsmith/CYBERHAWKS.LAB` from the same host), so
+  the AS/TGS correlation joins on `ckey` -- the principal name with the realm
+  stripped and lower-cased -- not the raw `client`. Joining on the raw string
+  produced a false positive on every legitimate host (a TGS whose own host's
+  AS-REQ was logged under the other realm spelling looked like reuse), most
+  visibly on `web` (10.0.2.5, the busiest Kerberos host). The `client` column
+  still displays the full principal; only the join key is normalized.
 known_false_positives: >-
-  None observed in a 24h lookback prior to the live test. **Design caveat,
-  not yet triggered in this range:** Kerberos constrained delegation
-  (S4U2Self/S4U2Proxy) legitimately produces a TGS-REQ for a user's client
-  principal originating from the delegating SERVICE's own IP, which never
-  itself did that user's AS-REQ -- this would false-positive under this
-  logic. Confirmed not an issue for this range's own SQL Server
-  linked-server chain (sql1->sql2 uses static `sa`-credential mapping, not
-  Kerberos protocol transition, per cyber-range's VULNERABLE_RANGE_PLAN.md
-  Phase F) -- revisit if constrained delegation is ever legitimately added.
+  With the realm-normalized join key and the positive-AS-evidence requirement
+  (`isnotnull(as_ips)`), a legitimate host's own TGS-REQs are correctly paired
+  to its own AS-REQ and suppressed. **Constrained delegation is no longer a
+  false positive:** S4U2Self/S4U2Proxy produces a TGS-REQ for an impersonated
+  user's principal from the delegating service's IP, but that user never did
+  an AS-REQ, so `as_ips` is null and the positive-evidence guard suppresses it
+  (this range's S4U path is covered by the dedicated Delegation detections).
+  Residual: if an attacker steals a TGT and the victim's original AS-REQ was
+  never captured (older than the 1-day lookback, or missed), this will not
+  fire -- an intentional trade to eliminate the blank-origin false positives;
+  reuse is only asserted when the initial authentication was actually seen
+  from another host.
 throttle: [destination, client]
 changes_2026_09_30: >-
   One row per reusing host and ticket owner (the minute bucket is gone).
-  Runs every minute over the events indexed in the previous minute
-  (`detection_window`), so an event is evaluated however late it arrives;
-  before this, each run searched the last minute of event time, and
-  anything indexed after its run (Security up to ~50s late, Zeek conn p90
-  ~1 min) was never evaluated. Each result row is its own alert, throttled
-  for 5m on the `throttle` fields.
+  Runs over the events indexed in the recent window (`detection_window`), so
+  an event is evaluated however late it arrives. Each result row is its own
+  alert, throttled for 5m on the `throttle` fields. **False-positive fix
+  (later 2026-09-30):** after the sensor `ignore_checksums` fix restored
+  same-vnet `kerberos.log`, this fired constantly with a blank origin on
+  legitimate hosts (notably web/10.0.2.5). Two causes fixed: (1) the AS/TGS
+  join now uses a realm-normalized principal key (Zeek logs `CYBERHAWKS` vs
+  `CYBERHAWKS.LAB` inconsistently, breaking the raw-string join), and (2) it
+  now requires positive AS evidence (`isnotnull(as_ips)`) so it never claims
+  reuse for a principal whose initial authentication was never observed --
+  which also removes the S4U constrained-delegation false-positive caveat.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
