@@ -20,15 +20,17 @@ data_source:
 search: |-
   index=zeek sourcetype=zeek:dce_rpc endpoint=samr (operation=SamrEnumerateUsersInDomain OR operation=SamrEnumerateGroupsInDomain OR operation=SamrEnumerateAliasesInDomain) `detection_window`
   | lookup known_range_hosts ip AS id_resp_h OUTPUT hostname
-  | eval attacker_ip=id_orig_h, host=lower(coalesce(hostname, id_resp_h)), method="samr", objects=case(operation="SamrEnumerateUsersInDomain","users", operation="SamrEnumerateGroupsInDomain","groups", operation="SamrEnumerateAliasesInDomain","groups", 1=1, operation)
+  | eval attacker_ip=id_orig_h, host=lower(coalesce(hostname, id_resp_h)), method="samr", otok=case(operation="SamrEnumerateUsersInDomain","users", operation="SamrEnumerateGroupsInDomain","groups", operation="SamrEnumerateAliasesInDomain","groups", 1=1,"users")
   | append [
       search index=windows EventCode=5145 Share_Name="*IPC$*" (Relative_Target_Name=samr OR Relative_Target_Name=lsarpc) `detection_window`
       | rex field=_raw "Account Name:\t*(?<acct>[^\r\n]+)"
       | where like(acct,"ANONYMOUS LOGON")
       | rex field=ComputerName "(?<host>[^.]+)"
-      | eval attacker_ip=Source_Address, host=lower(host), method=Relative_Target_Name, objects=if(Relative_Target_Name="samr","users or groups","SID lookup")
+      | eval attacker_ip=Source_Address, host=lower(host), method=Relative_Target_Name, otok=if(Relative_Target_Name="samr","ambiguous","sidlookup")
     ]
-  | stats values(objects) as objects values(method) as method by attacker_ip host
+  | stats values(otok) as otoks values(method) as method by attacker_ip host
+  | eval hasU=if(mvcount(mvfilter(otoks=="users"))>0,1,0), hasG=if(mvcount(mvfilter(otoks=="groups"))>0,1,0), hasA=if(mvcount(mvfilter(otoks=="ambiguous"))>0,1,0), hasS=if(mvcount(mvfilter(otoks=="sidlookup"))>0,1,0)
+  | eval objects=case(hasU==1 AND hasG==1,"users, groups", hasU==1,"users", hasG==1,"groups", hasA==1,"users or groups", hasS==1,"SID lookup", 1=1,"users")
   | `normalize_host(host)`
   | table attacker_ip host method objects
 how_to_implement: >-

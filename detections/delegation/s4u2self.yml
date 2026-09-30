@@ -40,6 +40,8 @@ search: |-
       search index=zeek sourcetype=zeek:kerberos request_type=TGS
       | eval tkey=id_orig_h.":".floor(_time), imp=replace(client,"/.*","")
       | stats values(imp) as impersonated by tkey ]
+  | eval impersonated=coalesce(impersonated,"unknown")
+  | mvexpand impersonated
   | join type=left attacker_ip user impersonated [
       search index=windows EventCode=4769
       | rex field=_raw "Transited Services:\s*(?<transited>[^\r\n]+)"
@@ -53,8 +55,10 @@ search: |-
       | where isnotnull(impersonated)
       | eval has_proxy=1
       | stats values(has_proxy) as has_proxy by attacker_ip user impersonated ]
-  | where isnull(has_proxy) OR isnull(impersonated)
-  | stats values(attacker_ip) as attacker_ip values(user) as user values(service) as service values(impersonated) as impersonated by logon_guid
+  | where isnull(has_proxy)
+  | stats count by attacker_ip user service impersonated
+  | fields - count
+  | eval impersonated=if(impersonated="unknown",null(),impersonated)
   | `normalize_user(user)`
   | `normalize_user(impersonated)`
   | table attacker_ip user service impersonated

@@ -15,14 +15,17 @@ data_source:
     merged into one alert per creation event
 search: |-
   index=windows sourcetype=XmlWinEventLog (EventID=19 OR EventID=20 OR EventID=21) `detection_window`
+  | rex field=_raw "Data Name='Operation'>(?<op>[^<]+)<"
+  | where op="Created"
   | rex field=_raw "Data Name='Name'>\s*\"(?<obj_name>[^\"]+)\""
+  | rex field=_raw "Data Name='User'>(?<wuser>[^<]+)<"
   | eval host_key=lower(host)
   | lookup known_range_hosts hostname AS host_key OUTPUT ip AS attacker_ip
-  | eval user=coalesce(User, "unknown")
-  | stats values(attacker_ip) as attacker_ip values(eval(if(EventID=19,obj_name,null()))) as producer values(eval(if(EventID=20,obj_name,null()))) as consumer values(eval(if(EventID=21,"yes",null()))) as binding by host user
+  | eval user=if(isnull(wuser) OR trim(wuser)="-", "unknown", trim(wuser))
+  | stats values(attacker_ip) as attacker_ip values(eval(if(EventID=19,obj_name,null()))) as filter values(eval(if(EventID=20,obj_name,null()))) as consumer values(eval(if(EventID=21,"yes",null()))) as binding by host user
   | `normalize_host(host)`
   | `normalize_user(user)`
-  | table attacker_ip host user producer consumer binding
+  | table attacker_ip host user filter consumer binding
 how_to_implement: >-
   No infra fix needed -- Sysmon's `WmiEvents` rule group in
   `sysmon_config.xml` already has an empty `onmatch="exclude"` filter
@@ -73,7 +76,7 @@ embed:
   additional_fields:
     - host
     - user
-    - producer
+    - filter
     - consumer
     - binding
 references:
