@@ -1,6 +1,6 @@
 name: DACL Modification
 id: ad-persistence-dacl-modification
-version: 4
+version: 5
 date: '2026-09-30'
 status: production
 category: ad-persistence
@@ -18,13 +18,12 @@ data_source:
 search: |-
   index=windows EventCode=5136 nTSecurityDescriptor "Value Added" `detection_window`
   | rex field=_raw "Subject:\r?\n\tSecurity ID:\t*\S+\r?\n\tAccount Name:\t*(?<user>\S+)"
-  | rex field=_raw "Value:\t(?<descriptor>O:.+?)\r?\n"
   | `subject_session`
   | `logon_source`
-  | stats values(descriptor) as descriptor by attacker_ip user DN
+  | stats count by attacker_ip user DN
   | rename DN as target
   | `normalize_user(user)`
-  | table attacker_ip user target descriptor
+  | table attacker_ip user target
 how_to_implement: >-
   No new infra fix needed -- the only object SACL in this range covering
   `nTSecurityDescriptor` writes (GenericAll, Success+Failure) is on the
@@ -62,6 +61,12 @@ changes_2026_09_30: >-
   anything indexed after its run (Security up to ~50s late, Zeek conn p90
   ~1 min) was never evaluated. Each result row is its own alert, throttled
   for 5m on the `throttle` fields.
+
+  v5 (2026-09-30, user request): dropped the `descriptor` output and embed
+  field. The alert now reports only who changed which object's DACL (user,
+  target), so the how_to_implement note about handing a human the full
+  descriptor text no longer applies to the output. Triggering, attribution
+  and throttling are unchanged.
 verification:
   date: '2026-09-27'
   reverification_2026_09_29: >-
@@ -87,7 +92,6 @@ embed:
   additional_fields:
     - user
     - target
-    - descriptor
 references:
   - 'detections/backlog.md, "AD persistence & privilege escalation" (backlog row: "ACL / delegation abuse")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
