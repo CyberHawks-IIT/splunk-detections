@@ -1,6 +1,6 @@
 name: Certificate Request (HTTP)
 id: adcs-certificate-request-http
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: adcs
@@ -26,22 +26,21 @@ data_source:
     Security log 4887 (certificate issued -- `Requester`, `Request ID`,
     `Certificate_Template`), already forwarded via the ca whitelist
 search: |-
-  index=windows host=ca EventCode=4887 DCOMorRPC=DCOM
+  index=windows host=ca EventCode=4887 DCOMorRPC=DCOM _index_earliest=-3m@m _index_latest=-2m@m
   | rex field=_raw "Requester:\s+(?<ruser>[^\r\n]+)"
   | rex field=_raw "Request ID:\s+(?<id>\S+)"
   | eval user=lower(mvindex(split(trim(ruser),"\\"),-1))
   | eval req_epoch=_time
-  | join type=inner max=0 user [
-      search index=iis host=ca cs_uri_stem="/certsrv/certfnsh.asp" cs_method=POST sc_status=200 earliest=-15m latest=now
+  | join type=left max=0 user [
+      search index=iis host=ca cs_uri_stem="/certsrv/certfnsh.asp" cs_method=POST sc_status=200 earliest=-4h latest=+5m
       | eval user=lower(mvindex(split(cs_username,"\\"),-1)), post=tostring(floor(_time)) . "|" . c_ip
       | stats values(post) as posts by user | eval posts=mvjoin(posts, ";")
     ]
   | eval posts=split(posts, ";")
   | eval prior_posts=mvmap(posts, if(tonumber(mvindex(split(posts, "|"), 0)) <= req_epoch + 2, posts, null()))
-  | eval Source_Network_Address=mvindex(split(mvindex(mvsort(prior_posts), -1), "|"), 1)
-  | stats values(Source_Network_Address) as Source_Network_Address values(user) as user values(Certificate_Template) as template by id
-  | rename Source_Network_Address as attacker_ip
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | eval attacker_ip=mvindex(split(mvindex(mvsort(prior_posts), -1), "|"), 1)
+  | stats values(attacker_ip) as attacker_ip values(user) as user values(Certificate_Template) as template by id
+  | `normalize_user(user)`
   | table attacker_ip user template id
 how_to_implement: >-
   Requires IIS log forwarding from `ca` (index=iis, ms:iis:auto -- see
@@ -84,6 +83,19 @@ known_false_positives: >-
   cert/task detections. Ambiguous only if one account posts from two hosts
   in the same window. Attribution is still by cs_username + time, since IIS
   and the CA event share no request identifier.
+throttle: [attacker_ip, id]
+changes_2026_09_30: >-
+  Index-time window like every detection, but one minute later than the
+  shared `detection_window`: the attacker IP comes from the IIS POST, and
+  IIS lines reach Splunk up to ~60s after the 4887, so this gives them two
+  minutes. Still one row per Request ID. The IIS join now also keeps a
+  request whose POST it can't find (attacker_ip blank) instead of dropping
+  the alert. Runs every minute over the events indexed in the previous
+  minute (`detection_window`), so an event is evaluated however late it
+  arrives; before this, each run searched the last minute of event time,
+  and anything indexed after its run (Security up to ~50s late, Zeek conn
+  p90 ~1 min) was never evaluated. Each result row is its own alert,
+  throttled for 5m on the `throttle` fields.
 verification:
   date: '2026-09-29'
   method: Live attack execution against the cyberhawks.lab range
@@ -110,16 +122,4 @@ embed:
 references:
   - 'detections/backlog.md, "ADCS" (backlog row: "HTTP web enrollment (ESC8)")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  # Trailing 1-minute window, evaluated every minute. `latest=-1m` (not `now`)
-  # ends the window a minute in the past, which gives the IIS log line time to
-  # flush + forward + index (measured ~38s end-to-end with HTTP.SYS buffering
-  # disabled -- see cyber-range iis_log_buffering) so nothing is clipped at the
-  # window's trailing edge; the windows are contiguous and non-overlapping, so
-  # each request is evaluated exactly once. Combined with the per-request-ID
-  # grouping above, several cert requests in quick succession each surface as
-  # their own row/alert rather than collapsing into one 5-minute bucket.
-  cron: '* * * * *'
-  earliest: '-2m'
-  latest: '-1m'
 disabled: false

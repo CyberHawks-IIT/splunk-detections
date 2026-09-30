@@ -1,6 +1,6 @@
 name: Certificate Request (RPC)
 id: adcs-certificate-request-rpc
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: adcs
@@ -16,19 +16,17 @@ data_source:
     correlated with Zeek `conn.log` (TCP/445, the SMB transport ICPR RPC
     uses) for source-IP attribution
 search: |-
-  index=windows EventCode=4887 DCOMorRPC=RPC
+  index=windows EventCode=4887 DCOMorRPC=RPC `detection_window`
   | where NOT match(Requester, "\$$")
   | rex field=ComputerName "(?<host>[^.]+)"
   | eval host_key=lower(host), acct=lower(replace(Requester, "^.*\\\\", "")), req_epoch=_time
-  | join type=left host_key acct [ search index=windows EventCode=4624 Logon_Type=3 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), acct=lower(mvindex(Account_Name,-1)), logon=tostring(floor(_time)) . "|" . Source_Network_Address | stats values(logon) as logons by host_key acct | eval logons=mvjoin(logons, ";") ]
+  | join type=left host_key acct [ search index=windows EventCode=4624 Logon_Type=3 earliest=-4h latest=+5m Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), acct=lower(mvindex(Account_Name,-1)), logon=tostring(floor(_time)) . "|" . Source_Network_Address | stats values(logon) as logons by host_key acct | eval logons=mvjoin(logons, ";") ]
   | eval logons=split(logons, ";")
   | eval prior_logons=mvmap(logons, if(tonumber(mvindex(split(logons, "|"), 0)) <= req_epoch + 1, logons, null()))
-  | eval Source_Network_Address=mvindex(split(mvindex(mvsort(prior_logons), -1), "|"), 1)
-  | bucket _time span=1m
-  | stats values(Source_Network_Address) as Source_Network_Address values(Requester) as user values(Certificate_Template) as template by _time host Request_ID
+  | eval attacker_ip=mvindex(split(mvindex(mvsort(prior_logons), -1), "|"), 1)
+  | stats values(attacker_ip) as attacker_ip values(Requester) as user values(Certificate_Template) as template by host Request_ID
   | rename Request_ID as id
-  | rename Source_Network_Address as attacker_ip
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | `normalize_user(user)`
   | table attacker_ip user template id
 how_to_implement: >-
   No infra fix needed -- 4886/4887 (Certification Services auditing) and
@@ -62,6 +60,15 @@ known_false_positives: >-
   the request. Ambiguous only if the same account requests from two
   machines at once. (The CA does not log a 5145 for the cert pipe, so that
   was not an option.)
+throttle: [attacker_ip, id]
+changes_2026_09_30: >-
+  One row per Request ID (the minute bucket is gone). Runs every minute
+  over the events indexed in the previous minute (`detection_window`), so
+  an event is evaluated however late it arrives; before this, each run
+  searched the last minute of event time, and anything indexed after its
+  run (Security up to ~50s late, Zeek conn p90 ~1 min) was never
+  evaluated. Each result row is its own alert, throttled for 5m on the
+  `throttle` fields.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
@@ -90,8 +97,4 @@ embed:
 references:
   - 'detections/backlog.md, "ADCS" (backlog row: "RPC/ICPR issuance (ESC1-4,6,7,9,10,13,15-17)")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

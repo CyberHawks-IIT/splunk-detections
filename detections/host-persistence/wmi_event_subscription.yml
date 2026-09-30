@@ -1,6 +1,6 @@
 name: WMI Event Subscription Creation
 id: host-persistence-wmi-event-subscription
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: host-persistence
@@ -14,15 +14,14 @@ data_source:
     Sysmon Events 19/20/21 (WmiEvent: filter/consumer/binding created),
     merged into one alert per creation event
 search: |-
-  index=windows sourcetype=XmlWinEventLog (EventID=19 OR EventID=20 OR EventID=21)
+  index=windows sourcetype=XmlWinEventLog (EventID=19 OR EventID=20 OR EventID=21) `detection_window`
   | rex field=_raw "Data Name='Name'>\s*\"(?<obj_name>[^\"]+)\""
-  | bucket _time span=1m
-  | stats values(User) as user values(eval(if(EventID=19,obj_name,null()))) as producer values(eval(if(EventID=20,obj_name,null()))) as consumer values(eval(if(EventID=21,"yes",null()))) as binding by _time host
   | eval host_key=lower(host)
-  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS Source_Network_Address
-  | rename Source_Network_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS attacker_ip
+  | eval user=coalesce(User, "unknown")
+  | stats values(attacker_ip) as attacker_ip values(eval(if(EventID=19,obj_name,null()))) as producer values(eval(if(EventID=20,obj_name,null()))) as consumer values(eval(if(EventID=21,"yes",null()))) as binding by host user
+  | `normalize_host(host)`
+  | `normalize_user(user)`
   | table attacker_ip host user producer consumer binding
 how_to_implement: >-
   No infra fix needed -- Sysmon's `WmiEvents` rule group in
@@ -39,6 +38,17 @@ how_to_implement: >-
 known_false_positives: >-
   None expected -- no legitimate WMI-based automation is deployed in this
   range.
+throttle: [attacker_ip, host, user]
+changes_2026_09_30: >-
+  Grouped by host AND user (was host+minute, so two users' subscriptions
+  on one host merged). attacker_ip is still the host's own IP: Sysmon
+  19-21 carry no session to trace, so two attackers on one host are told
+  apart by user, not IP. Runs every minute over the events indexed in the
+  previous minute (`detection_window`), so an event is evaluated however
+  late it arrives; before this, each run searched the last minute of event
+  time, and anything indexed after its run (Security up to ~50s late, Zeek
+  conn p90 ~1 min) was never evaluated. Each result row is its own alert,
+  throttled for 5m on the `throttle` fields.
 verification:
   date: '2026-09-27'
   reverification_2026_09_29: >-
@@ -69,8 +79,4 @@ embed:
 references:
   - 'detections/backlog.md, "Host persistence" (backlog row: "WMI event subscription persistence")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

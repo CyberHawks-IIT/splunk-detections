@@ -1,6 +1,6 @@
 name: Domain Replication (DCSync)
 id: credential-dumping-dcsync
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: credential-dumping
@@ -19,21 +19,14 @@ data_source:
     DS-Replication-Get-Changes-All ({1131f6ad-9c07-11d1-f79f-00c04fc2dcd2})
     extended-right GUIDs
 search: |-
-  index=windows EventCode=4662 ("1131f6aa-9c07-11d1-f79f-00c04fc2dcd2" OR "1131f6ad-9c07-11d1-f79f-00c04fc2dcd2")
+  index=windows EventCode=4662 ("1131f6aa-9c07-11d1-f79f-00c04fc2dcd2" OR "1131f6ad-9c07-11d1-f79f-00c04fc2dcd2") `detection_window`
   | rex field=_raw "Subject\s*:\s*\r?\n\tSecurity ID:\t*\S+\r?\n\tAccount Name:\t*(?<user>\S+)"
-  | rex field=ComputerName "(?<host>[^.]+)"
   | where NOT match(user, "\$$")
-  | rex field=ComputerName "(?<host_key>[^.]+)"
-  | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
-  | eval host_key=lower(host_key), session_id=lower(session_id)
-  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Source_Network_Address) as logon_src by host_key session_id ]
-  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
-  | eval Source_Network_Address=coalesce(logon_src, host_ip)
-  | bucket _time span=1m
-  | stats values(Source_Network_Address) as Source_Network_Address by _time user host
-  | rename Source_Network_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | `subject_session`
+  | `logon_source`
+  | stats count by attacker_ip user host_key
+  | rename host_key as host
+  | `normalize_user(user)`
   | table attacker_ip user host
 how_to_implement: >-
   No forwarder/audit-policy fix needed this time -- "Directory Service
@@ -67,6 +60,14 @@ known_false_positives: >-
   shipping an unreliable join; `user` (the account name) is the available
   attribution instead, same documented-gap pattern as Machine Account
   Creation/Privileged Group Membership.
+throttle: [attacker_ip, user, host]
+changes_2026_09_30: >-
+  Grouped by attacker instead of by minute. Runs every minute over the
+  events indexed in the previous minute (`detection_window`), so an event
+  is evaluated however late it arrives; before this, each run searched the
+  last minute of event time, and anything indexed after its run (Security
+  up to ~50s late, Zeek conn p90 ~1 min) was never evaluated. Each result
+  row is its own alert, throttled for 5m on the `throttle` fields.
 verification:
   date: '2026-09-27'
   reverification_2026_09_29: >-
@@ -98,8 +99,4 @@ embed:
 references:
   - 'detections/backlog.md, "Credential & ticket dumping" (backlog row: "DCSync")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

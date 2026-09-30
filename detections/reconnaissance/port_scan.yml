@@ -1,6 +1,6 @@
 name: Port Scan
 id: recon-port-scan
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: reconnaissance
@@ -10,15 +10,17 @@ description: >-
 data_source:
   - Zeek conn.log (proto=tcp or udp)
 search: |-
-  index=zeek sourcetype=zeek:conn (proto=tcp OR proto=udp) id_resp_h=10.0.2.* NOT id_resp_p=123 NOT id_orig_h=10.0.2.1
+  index=zeek sourcetype=zeek:conn (proto=tcp OR proto=udp) id_resp_h=10.0.2.* NOT id_resp_p=123 NOT id_orig_h=10.0.2.1 earliest=-30m latest=+5m
   | where isnull(history) OR (substr(history,1,1)!="H" AND NOT (match(history,"^[Cc]+$") AND id_resp_p>=49152))
-  | bucket _time span=30s
+  | eval new_event=if(`in_detection_window(_indextime)`, 1, 0)
   | lookup known_range_hosts ip AS id_resp_h OUTPUT hostname AS resp_name
   | eval resp_host=coalesce(resp_name, id_resp_h)
-  | stats dc(id_resp_p) as distinct_ports dc(id_resp_h) as distinct_hosts values(resp_host) as hosts values(id_resp_p) as ports values(proto) as protocol by _time id_orig_h
-  | where distinct_ports>=15 OR distinct_hosts>=6
+  | sort 0 _time
+  | streamstats time_window=30s dc(id_resp_p) as distinct_ports dc(id_resp_h) as distinct_hosts values(resp_host) as hosts values(id_resp_p) as ports values(proto) as protocol max(new_event) as has_new by id_orig_h
+  | where (distinct_ports>=15 OR distinct_hosts>=6) AND has_new=1
+  | stats values(hosts) as hosts values(protocol) as protocol values(ports) as ports by id_orig_h
   | rename id_orig_h as attacker_ip
-  | eval hosts=if(isnull(hosts), null(), mvmap(hosts, if(match(hosts, "^[0-9.]+$") OR like(hosts, "%:%"), hosts, lower(replace(hosts, "\..*$", "")))))
+  | `normalize_host(hosts)`
   | table attacker_ip hosts protocol ports
 how_to_implement: >-
   Requires defense-tooling's Zeek sensor forwarding conn.log, plus this
@@ -56,6 +58,19 @@ known_false_positives: >-
   their own source IP preserved, so no attacker appears as 10.0.2.1.
   Replayed over the full ~5h of data since boot, v2 fires only on the
   deliberate john-kali scan.
+throttle: [attacker_ip]
+changes_2026_09_30: >-
+  Sliding 30s window per source instead of fixed 30s buckets (a scan split
+  across a boundary could miss both thresholds), over the last 30 minutes
+  of flows, alerting when a window over threshold includes a newly indexed
+  flow. Zeek writes each flow when it ends, so one scan's flows arrive
+  over several minutes; the throttle keeps it to one alert per scanner per
+  5 minutes. Runs every minute and looks back 30 minutes, so an event
+  arriving up to 30 minutes late is still evaluated; before this, each run
+  searched the last minute of event time, and anything indexed after its
+  run (Security up to ~50s late, Zeek conn p90 ~1 min) was never
+  evaluated. Each result row is its own alert, throttled for 5m on the
+  `throttle` fields.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
@@ -77,8 +92,4 @@ embed:
 references:
   - detections/backlog.md, "Reconnaissance & discovery"
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '*/1 * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

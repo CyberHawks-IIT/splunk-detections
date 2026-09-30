@@ -1,6 +1,6 @@
 name: 'Delegation: S4U2Self'
 id: delegation-s4u2self
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: delegation
@@ -25,7 +25,7 @@ data_source:
     impersonated principal (its `client` field), which the Windows 4769
     event does not carry. Correlated on attacker IP + event second.
 search: |-
-  index=windows EventCode=4769
+  index=windows EventCode=4769 `detection_window`
   | rex field=_raw "Transited Services:\s*(?<transited>[^\r\n]+)"
   | eval attacker_ip=replace(Client_Address,"^::ffff:","")
   | eval user=replace(Account_Name,"@.*","")
@@ -54,9 +54,9 @@ search: |-
       | eval has_proxy=1
       | stats values(has_proxy) as has_proxy by attacker_ip user impersonated ]
   | where isnull(has_proxy) OR isnull(impersonated)
-  | stats values(attacker_ip) as attacker_ip values(user) as user values(service) as service by logon_guid impersonated
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
-  | eval impersonated=if(isnull(impersonated), null(), mvmap(impersonated, replace(replace(impersonated, "^.*\\\\", ""), "@.*$", "")))
+  | stats values(attacker_ip) as attacker_ip values(user) as user values(service) as service values(impersonated) as impersonated by logon_guid
+  | `normalize_user(user)`
+  | `normalize_user(impersonated)`
   | table attacker_ip user service impersonated
 how_to_implement: >-
   No infra fix needed -- 4769 from the DCs and Zeek's `kerberos.log` are
@@ -86,6 +86,18 @@ known_false_positives: >-
   note:** `impersonated` comes from Zeek, which decodes Kerberos cleanly
   only for router-crossing traffic (the default attacker path); an S4U2Self
   launched from the DC's own vnet may fire with a blank `impersonated`.
+throttle: [attacker_ip, user, service]
+changes_2026_09_30: >-
+  Now runs every minute like the rest (was every 5 minutes over 5 minutes
+  of event time). Fixed: the final stats grouped by impersonated, which
+  silently dropped every S4U2Self whose impersonated user Zeek missed, the
+  case the design says must still fire. Now grouped by Logon GUID only.
+  Pairing logic unchanged. Runs every minute over the events indexed in
+  the previous minute (`detection_window`), so an event is evaluated
+  however late it arrives; before this, each run searched the last minute
+  of event time, and anything indexed after its run (Security up to ~50s
+  late, Zeek conn p90 ~1 min) was never evaluated. Each result row is its
+  own alert, throttled for 5m on the `throttle` fields.
 verification:
   date: '2026-09-29'
   method: Live attack execution against the cyberhawks.lab range
@@ -115,8 +127,4 @@ embed:
 references:
   - 'detections/backlog.md, "AD persistence & privilege escalation" (constrained delegation abuse)'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '*/5 * * * *'
-  earliest: '-5m'
-  latest: now
 disabled: false

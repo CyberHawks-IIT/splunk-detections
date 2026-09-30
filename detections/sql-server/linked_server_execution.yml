@@ -1,6 +1,6 @@
 name: Linked Server Execution
 id: sql-server-linked-server-execution
-version: 4
+version: 5
 date: '2026-09-30'
 status: production
 category: sql-server
@@ -15,21 +15,21 @@ data_source:
     SQL Server Extended Events (`detection_sql_text` session), sql_text
     matching OPENQUERY
 search: |-
-  index=mssql sourcetype=mssql_xe_text sql_text="*OPENQUERY*" NOT username="svc-sqlmonitor" NOT username="NT SERVICE*"
+  index=mssql sourcetype=mssql_xe_text sql_text="*OPENQUERY*" NOT username="svc-sqlmonitor" NOT username="NT SERVICE*" `detection_window`
   | eval event_epoch=strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z")
   | where isnotnull(event_epoch) AND _time - event_epoch <= 600
   | eval host=replace(source, "_mssql_xe_text", "")
   | rex field=sql_text "OPENQUERY\(\[?(?<linked>[^,\]]+)\]?,"
   | rename username as user
   | lookup known_range_hosts hostname AS host OUTPUT ip AS host_ip
-  | join type=left host session_id [ search index=mssql sourcetype=mssql_audit action_id=LGIS earliest=-7d latest=now | eval host=replace(source, "_mssql_audit", ""), login=tostring(floor(strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z"))) . "|" . client_address | stats values(login) as logins by host session_id | eval logins=mvjoin(logins, ";") ]
+  | join type=left host session_id [ search index=mssql sourcetype=mssql_audit action_id=LGIS earliest=-7d latest=+5m | eval host=replace(source, "_mssql_audit", ""), login=tostring(floor(strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z"))) . "|" . client_address | stats values(login) as logins by host session_id | eval logins=mvjoin(logins, ";") ]
   | eval logins=split(logins, ";")
   | eval prior_logins=mvmap(logins, if(tonumber(mvindex(split(logins, "|"), 0)) <= event_epoch + 1, logins, null()))
-  | eval Source_Network_Address=mvindex(split(mvindex(mvsort(prior_logins), -1), "|"), 1)
-  | eval Source_Network_Address=if(Source_Network_Address="local machine", host_ip, Source_Network_Address)
-  | rename Source_Network_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | eval attacker_ip=mvindex(split(mvindex(mvsort(prior_logins), -1), "|"), 1)
+  | eval attacker_ip=if(attacker_ip="local machine", host_ip, attacker_ip)
+  | stats values(attacker_ip) as attacker_ip by host session_id user linked
+  | `normalize_host(host)`
+  | `normalize_user(user)`
   | table attacker_ip host user linked
 how_to_implement: >-
   Same data source and operational gotcha as xp_cmdshell Execution --
@@ -71,6 +71,15 @@ known_false_positives: >-
   one ;-joined string: `join` flattens a multivalue field into a single
   newline-joined value, which made the first live test pick the wrong
   login.)
+throttle: [attacker_ip, host, user, linked]
+changes_2026_09_30: >-
+  Deduplicated to one row per SQL session (host + session_id) and linked
+  server (was one row per statement). Runs every minute over the events indexed in the
+  previous minute (`detection_window`), so an event is evaluated however
+  late it arrives; before this, each run searched the last minute of event
+  time, and anything indexed after its run (Security up to ~50s late, Zeek
+  conn p90 ~1 min) was never evaluated. Each result row is its own alert,
+  throttled for 5m on the `throttle` fields.
 verification:
   date: '2026-09-27'
   reverification_2026_09_29: >-
@@ -112,8 +121,4 @@ embed:
 references:
   - 'detections/backlog.md, "SQL Server" (backlog row: "Linked server command execution")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

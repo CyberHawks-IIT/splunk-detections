@@ -1,6 +1,6 @@
 name: DPAPI Dump
 id: dpapi-dump
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: credential-dumping
@@ -13,19 +13,13 @@ description: >-
 data_source:
   - 'Windows Events -- 4663, Object Name under a Protect or Credentials folder'
 search: |-
-  index=windows EventCode=4663 (Object_Name="*\Protect\*" OR Object_Name="*\Protect" OR Object_Name="*\Credentials\*" OR Object_Name="*\Credentials") NOT Process_Name="*lsass.exe"
-  | rex field=ComputerName "(?<host_key>[^.]+)"
-  | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
-  | eval host_key=lower(host_key), session_id=lower(session_id)
-  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Source_Network_Address) as logon_src by host_key session_id ]
-  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
-  | eval Source_Network_Address=coalesce(logon_src, host_ip)
-  | bucket _time span=10s
-  | stats count values(Object_Name) as files values(Source_Network_Address) as Source_Network_Address by _time ComputerName Account_Name
+  index=windows EventCode=4663 (Object_Name="*\Protect\*" OR Object_Name="*\Protect" OR Object_Name="*\Credentials\*" OR Object_Name="*\Credentials") NOT Process_Name="*lsass.exe" `detection_window`
+  | `subject_session`
+  | `logon_source`
+  | stats values(Object_Name) as files by attacker_ip ComputerName Account_Name
   | rename ComputerName as host, Account_Name as user
-  | rename Source_Network_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | `normalize_host(host)`
+  | `normalize_user(user)`
   | table attacker_ip host user files
 how_to_implement: >-
   Requires the file-system SACL on the Protect and Credentials folders
@@ -34,6 +28,16 @@ how_to_implement: >-
   additional fix needed, unlike the SAM/SECURITY export technique.
 known_false_positives: >-
   None found over 4h of normal range background traffic.
+throttle: [attacker_ip, host, user]
+changes_2026_09_30: >-
+  Grouped by attacker (was by host+user+10s bucket: two attackers merged,
+  and one dump straddling a 10s boundary fired twice). Runs every minute
+  over the events indexed in the previous minute (`detection_window`), so
+  an event is evaluated however late it arrives; before this, each run
+  searched the last minute of event time, and anything indexed after its
+  run (Security up to ~50s late, Zeek conn p90 ~1 min) was never
+  evaluated. Each result row is its own alert, throttled for 5m on the
+  `throttle` fields.
 verification:
   date: '2026-09-27'
   reverification_2026_09_29: >-
@@ -56,8 +60,4 @@ embed:
 references:
   - 'detections/backlog.md, "Credential & ticket dumping" (backlog row: "DPAPI masterkey / credential file theft")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

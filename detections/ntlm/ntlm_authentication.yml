@@ -1,6 +1,6 @@
 name: NTLM Authentication
 id: ntlm-authentication
-version: 4
+version: 5
 date: '2026-09-30'
 status: production
 category: ntlm
@@ -15,14 +15,14 @@ description: >-
 data_source:
   - 'Windows Events -- 4624, Authentication Package Name = NTLM'
 search: |-
-  index=windows EventCode=4624 Authentication_Package=NTLM NOT Source_Network_Address IN ("-","10.0.2.1")
+  index=windows EventCode=4624 Authentication_Package=NTLM NOT Source_Network_Address IN ("-","10.0.2.1") `detection_window`
   | lookup known_range_hosts ip AS Source_Network_Address OUTPUT hostname
   | where isnull(hostname)
-  | rename ComputerName as host, Account_Name as user
-  | eval user=mvindex(user,-1)
-  | rename Source_Network_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | eval user=mvindex(Account_Name,-1)
+  | stats count by Source_Network_Address ComputerName user
+  | rename Source_Network_Address as attacker_ip, ComputerName as host
+  | `normalize_host(host)`
+  | `normalize_user(user)`
   | table attacker_ip host user
 how_to_implement: >-
   Requires defense-tooling's Windows forwarder shipping Security log 4624,
@@ -47,6 +47,15 @@ known_false_positives: >-
   VPN NAT) and from the dedicated relay box "test" (10.0.2.10, on the range
   subnet directly) both retain their real source IPs -- neither gets
   NAT-masked the way this control host's traffic does.
+throttle: [attacker_ip, host, user]
+changes_2026_09_30: >-
+  Deduplicated to one row per attacker, host and account (was one row per
+  4624, several per attempt). Runs every minute over the events indexed in
+  the previous minute (`detection_window`), so an event is evaluated
+  however late it arrives; before this, each run searched the last minute
+  of event time, and anything indexed after its run (Security up to ~50s
+  late, Zeek conn p90 ~1 min) was never evaluated. Each result row is its
+  own alert, throttled for 5m on the `throttle` fields.
 verification:
   date: '2026-09-27'
   reverification_2026_09_29: >-
@@ -85,8 +94,4 @@ references:
   - >-
     detections/backlog.md, "NTLM relay & coercion" (backlog row: "Relayed
     SMB or LDAP connection")
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

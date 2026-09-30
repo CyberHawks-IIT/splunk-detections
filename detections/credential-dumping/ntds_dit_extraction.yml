@@ -1,6 +1,6 @@
 name: NTDS.dit Extraction
 id: credential-dumping-ntds-dit-extraction
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: credential-dumping
@@ -20,19 +20,12 @@ data_source:
     \NTDS\ntds.dit (requires Audit Handle Manipulation + the ntds.dit file
     SACL), 4624 (logon session -> source IP)
 search: |-
-  index=windows (EventCode=4656 OR EventCode=4663) Object_Name="*NTDS*ntds.dit*" NOT Process_Name="*lsass.exe"
-  | rex field=ComputerName "(?<host_key>[^.]+)"
-  | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
-  | eval host_key=lower(host_key), session_id=lower(session_id)
-  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Source_Network_Address) as logon_src by host_key session_id ]
-  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
-  | eval Source_Network_Address=coalesce(logon_src, host_ip)
-  | bucket _time span=1m
-  | stats values(Account_Name) as user values(Source_Network_Address) as Source_Network_Address by _time host_key
+  index=windows (EventCode=4656 OR EventCode=4663) Object_Name="*NTDS*ntds.dit*" NOT Process_Name="*lsass.exe" `detection_window`
+  | `subject_session`
+  | `logon_source`
+  | stats values(Account_Name) as user by attacker_ip host_key
   | rename host_key as host
-  | rename Source_Network_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | `normalize_user(user)`
   | table attacker_ip host user
 how_to_implement: >-
   Requires the file-system SACL on `%SystemRoot%\NTDS\ntds.dit`
@@ -63,6 +56,15 @@ known_false_positives: >-
   path, and does not match an attacker-chosen IFM destination copy (which
   lives outside a \NTDS\ directory), so it keys on the source read, not the
   copy-out.
+throttle: [attacker_ip, host]
+changes_2026_09_30: >-
+  Grouped by attacker (was by host+minute, so two attackers on one DC
+  merged). Runs every minute over the events indexed in the previous
+  minute (`detection_window`), so an event is evaluated however late it
+  arrives; before this, each run searched the last minute of event time,
+  and anything indexed after its run (Security up to ~50s late, Zeek conn
+  p90 ~1 min) was never evaluated. Each result row is its own alert,
+  throttled for 5m on the `throttle` fields.
 verification:
   date: '2026-09-29'
   method: Live attack execution against the cyberhawks.lab range
@@ -89,8 +91,4 @@ embed:
 references:
   - 'detections/backlog.md, "Credential & ticket dumping" (backlog row: "NTDS.dit extraction (IFM / shadow copy on a DC)")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

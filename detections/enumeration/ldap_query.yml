@@ -1,6 +1,6 @@
 name: LDAP Query
 id: enumeration-ldap-query
-version: 5
+version: 6
 date: '2026-09-30'
 status: production
 category: enumeration
@@ -27,24 +27,24 @@ data_source:
     by client IP + source port for LDAP/LDAPS, by DC + connection time window
     (Zeek `ts` .. `ts`+`duration`, +/-2s) for ADWS's loopback 1644s
 search: |-
-  index=zeek sourcetype=zeek:conn (id_resp_p=389 OR id_resp_p=636 OR id_resp_p=9389)
+  index=zeek sourcetype=zeek:conn (id_resp_p=389 OR id_resp_p=636 OR id_resp_p=9389) `detection_window`
   | where match(history, "D") OR match(history, "^[Cc]+$")
   | lookup known_range_hosts ip AS id_orig_h OUTPUT hostname
   | where isnull(hostname)
   | eval protocol=case(id_resp_p=389, "ldap", id_resp_p=636, "ldaps", id_resp_p=9389, "adws")
-  | rename id_orig_h as Source_Network_Address, id_resp_h as host, id_orig_p as client_port
+  | rename id_orig_h as attacker_ip, id_resp_h as host, id_orig_p as client_port
   | lookup known_range_hosts ip AS host OUTPUT hostname AS dc
   | eval conn_start=tonumber(ts), conn_end=conn_start+coalesce(tonumber(duration), 0), adws_dc=if(protocol="adws", dc, null())
-  | join type=left Source_Network_Address client_port [
-      search index=windows source="WinEventLog:Directory Service" EventCode=1644 earliest=-5m latest=now
-      | rex field=_raw "Client:\r?\n(?<Source_Network_Address>[0-9.]+):(?<client_port>\d+)"
+  | join type=left attacker_ip client_port [
+      search index=windows source="WinEventLog:Directory Service" EventCode=1644
+      | rex field=_raw "Client:\r?\n(?<attacker_ip>[0-9.]+):(?<client_port>\d+)"
       | where isnotnull(client_port)
       | rex field=_raw "Filter:\r?\n\s*(?<query>.+?)\s*\r?\n"
       | rex field=_raw "User:\r?\n(?<user>\S+)"
-      | stats values(user) as user values(query) as query by Source_Network_Address client_port
+      | stats values(user) as user values(query) as query by attacker_ip client_port
     ]
   | join type=left max=0 adws_dc [
-      search index=windows source="WinEventLog:Directory Service" EventCode=1644 earliest=-5m latest=now
+      search index=windows source="WinEventLog:Directory Service" EventCode=1644
       | rex field=_raw "Client:\r?\n\[?(?<client_ip>[^\]\s]+?)\]?:\d+\s"
       | where client_ip="::1" OR client_ip="127.0.0.1"
       | rex field=_raw "User:\r?\n(?<adws_user>\S+)"
@@ -55,12 +55,10 @@ search: |-
     ]
   | eval in_window=if(q_time>=conn_start-2 AND q_time<=conn_end+2, 1, 0)
   | eval user=if(protocol="adws", if(in_window=1, adws_user, null()), user), query=if(protocol="adws", if(in_window=1, adws_query, null()), query)
-  | bucket _time span=1m
-  | stats values(user) as user values(query) as query by _time Source_Network_Address host protocol
-  | rename Source_Network_Address as attacker_ip
+  | stats values(user) as user values(query) as query by attacker_ip host protocol
   | lookup known_range_hosts ip AS host OUTPUT hostname AS host_name | eval host=coalesce(host_name, host)
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | `normalize_host(host)`
+  | `normalize_user(user)`
   | table attacker_ip host protocol user query
 how_to_implement: >-
   **1644 must log every search, and the thresholds must be 1, not 0.**
@@ -116,6 +114,17 @@ known_false_positives: >-
   Checksum-only flows (history all "C"/"c", typical of same-vnet mirrored
   taps where Zeek can't parse flags) are kept so an attacker on the ad vnet
   is not missed.
+throttle: [attacker_ip, host, protocol]
+changes_2026_09_30: >-
+  Grouped by attacker, DC and protocol (the minute bucket is gone). The
+  1644 joins now cover the whole lookback instead of the last 5 minutes:
+  Zeek writes a connection when it closes, so a session held open longer
+  than 5 minutes used to lose its query text. Runs every minute over the
+  events indexed in the previous minute (`detection_window`), so an event
+  is evaluated however late it arrives; before this, each run searched the
+  last minute of event time, and anything indexed after its run (Security
+  up to ~50s late, Zeek conn p90 ~1 min) was never evaluated. Each result
+  row is its own alert, throttled for 5m on the `throttle` fields.
 verification:
   reverification_2026_09_30: >-
     History-filter change, replayed inline over all ~7h of data since boot
@@ -157,8 +166,4 @@ references:
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
   - https://learn.microsoft.com/en-us/troubleshoot/windows-server/active-directory/event1644reader-analyze-ldap-query-performance
   - https://www.huntress.com/blog/ldap-active-directory-detection-part-5b
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

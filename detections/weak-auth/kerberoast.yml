@@ -1,6 +1,6 @@
 name: Kerberoast
 id: weak-auth-kerberoast
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: weak-auth
@@ -21,14 +21,15 @@ data_source:
     distinct non-machine-account Service Names requested by one source
     within 5 minutes
 search: |-
-  index=windows EventCode=4769 NOT Service_Name=krbtgt NOT Service_Name="*$"
-  | eval Client_Address=replace(Client_Address, "^::ffff:", "")
+  index=windows EventCode=4769 NOT Service_Name=krbtgt NOT Service_Name="*$" earliest=-30m latest=+5m
+  | eval new_event=if(`in_detection_window(_indextime)`, 1, 0)
+  | eval attacker_ip=replace(Client_Address, "^::ffff:", ""), rc4=if(Ticket_Encryption_Type="0x17", 1, 0)
   | eval encryption=case(Ticket_Encryption_Type="0x17","rc4-hmac", Ticket_Encryption_Type="0x12","aes256", Ticket_Encryption_Type="0x11","aes128", Ticket_Encryption_Type="0x3","des-cbc-md5", 1=1, Ticket_Encryption_Type)
-  | bucket _time span=5m
-  | stats values(Service_Name) as users dc(Service_Name) as distinct_services values(encryption) as encryption values(Ticket_Encryption_Type) as raw_enc by _time Client_Address
-  | where distinct_services>=2 OR like(raw_enc,"%0x17%")
-  | rename Client_Address as attacker_ip
-  | eval users=if(isnull(users), null(), mvmap(users, replace(replace(users, "^.*\\\\", ""), "@.*$", "")))
+  | sort 0 _time
+  | streamstats time_window=5m dc(Service_Name) as distinct_services max(rc4) as rc4_seen values(Service_Name) as users values(encryption) as encryption max(new_event) as has_new by attacker_ip
+  | where (distinct_services>=2 OR rc4_seen=1) AND has_new=1
+  | stats values(users) as users values(encryption) as encryption by attacker_ip
+  | `normalize_user(users)`
   | table attacker_ip users encryption
 how_to_implement: >-
   Requires defense-tooling's Windows forwarder shipping Security log 4769
@@ -53,6 +54,17 @@ known_false_positives: >-
   either leg's threshold. Zero RC4-HMAC 4769 events and a max of 3 distinct
   Service_Names in any 5-minute window (always all machine accounts) found
   in 24h of background traffic before this session's live test.
+throttle: [attacker_ip]
+changes_2026_09_30: >-
+  Sliding 5-minute window per source instead of fixed 5-minute buckets run
+  every 5 minutes: two SPN requests straddling a bucket boundary never met
+  the 2-service threshold. Alerts when a window meeting the rule (2+
+  services, or any RC4 ticket) includes a newly indexed request. Runs
+  every minute and looks back 30 minutes, so an event arriving up to 30
+  minutes late is still evaluated; before this, each run searched the last
+  minute of event time, and anything indexed after its run (Security up to
+  ~50s late, Zeek conn p90 ~1 min) was never evaluated. Each result row is
+  its own alert, throttled for 5m on the `throttle` fields.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
@@ -76,8 +88,4 @@ embed:
 references:
   - 'detections/backlog.md, "Weak / missing authentication" (backlog row: "Kerberoast")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '*/5 * * * *'
-  earliest: '-5m'
-  latest: now
 disabled: false

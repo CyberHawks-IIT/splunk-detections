@@ -1,6 +1,6 @@
 name: Zone Transfer
 id: weak-auth-zone-transfer
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: weak-auth
@@ -15,11 +15,11 @@ description: >-
 data_source:
   - Zeek dns.log, qtype_name=AXFR
 search: |-
-  index=zeek sourcetype=zeek:dns qtype_name=AXFR
-  | rename id_resp_h as host
-  | rename id_orig_h as attacker_ip
+  index=zeek sourcetype=zeek:dns qtype_name=AXFR `detection_window`
+  | stats count by id_orig_h id_resp_h
+  | rename id_orig_h as attacker_ip, id_resp_h as host
   | lookup known_range_hosts ip AS host OUTPUT hostname AS host_name | eval host=coalesce(host_name, host)
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
+  | `normalize_host(host)`
   | table attacker_ip host
 how_to_implement: >-
   Requires defense-tooling's Zeek sensor forwarding dns.log (already
@@ -33,6 +33,15 @@ known_false_positives: >-
   even sees a completed transfer, but the query itself still lands in
   dns.log with qtype_name=AXFR either way -- this detection fires on the
   attempt, not just a successful transfer.
+throttle: [attacker_ip, host]
+changes_2026_09_30: >-
+  Deduplicated to one row per source and DNS server. Runs every minute
+  over the events indexed in the previous minute (`detection_window`), so
+  an event is evaluated however late it arrives; before this, each run
+  searched the last minute of event time, and anything indexed after its
+  run (Security up to ~50s late, Zeek conn p90 ~1 min) was never
+  evaluated. Each result row is its own alert, throttled for 5m on the
+  `throttle` fields.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
@@ -48,8 +57,4 @@ embed:
 references:
   - 'detections/backlog.md, "Weak / missing authentication" (backlog row: "Zone transfer (AXFR)")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

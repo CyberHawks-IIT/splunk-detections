@@ -1,6 +1,6 @@
 name: NetNTLMv1 Authentication
 id: weak-auth-netntlmv1
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: weak-auth
@@ -17,13 +17,13 @@ data_source:
   - >-
     Windows Events -- 4624, `Package Name (NTLM only)` = NTLM V1
 search: |-
-  index=windows EventCode=4624 Package_Name__NTLM_only_="NTLM V1"
-  | eval target_user=mvindex(Account_Name, -1)
-  | where target_user!="-" AND target_user!="ANONYMOUS LOGON" AND NOT match(target_user, "\$$")
-  | rename Source_Network_Address as ip, ComputerName as host, target_user as user
-  | rename ip as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  index=windows EventCode=4624 Package_Name__NTLM_only_="NTLM V1" `detection_window`
+  | eval user=mvindex(Account_Name, -1)
+  | where user!="-" AND user!="ANONYMOUS LOGON" AND NOT match(user, "\$$")
+  | stats count by Source_Network_Address ComputerName user
+  | rename Source_Network_Address as attacker_ip, ComputerName as host
+  | `normalize_host(host)`
+  | `normalize_user(user)`
   | table attacker_ip host user
 how_to_implement: >-
   Requires defense-tooling's Windows forwarder shipping Security log 4624
@@ -44,6 +44,15 @@ known_false_positives: >-
   dedicated detection (SMB Anonymous Object Enumeration). Excluding
   machine accounts and anonymous/null logons leaves zero false positives
   in the same 24h window.
+throttle: [attacker_ip, host, user]
+changes_2026_09_30: >-
+  Deduplicated to one row per attacker, host and account. Runs every
+  minute over the events indexed in the previous minute
+  (`detection_window`), so an event is evaluated however late it arrives;
+  before this, each run searched the last minute of event time, and
+  anything indexed after its run (Security up to ~50s late, Zeek conn p90
+  ~1 min) was never evaluated. Each result row is its own alert, throttled
+  for 5m on the `throttle` fields.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
@@ -64,8 +73,4 @@ embed:
 references:
   - 'detections/backlog.md, "Weak / missing authentication" (backlog row: "NetNTLMv1 permitted")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

@@ -1,7 +1,7 @@
 name: Web Credential Read (Web.config.bak)
 id: web-application-web-config-bak-leak
-version: 1
-date: '2026-09-29'
+version: 2
+date: '2026-09-30'
 status: production
 category: web-application
 description: >-
@@ -19,10 +19,9 @@ data_source:
     IIS W3C access log on `web` (`index=iis`, sourcetype `ms:iis:auto`,
     host=WEB), fields `cs_uri_stem`, `sc_status`, `c_ip`
 search: |-
-  index=iis host=WEB sc_status=200 (cs_uri_stem="*.bak" OR cs_uri_stem="*.old" OR cs_uri_stem="*.backup" OR cs_uri_stem="*.save" OR cs_uri_stem="*.orig" OR cs_uri_stem="*.config" OR cs_uri_stem="*~")
-  | rename c_ip as Source_Network_Address, cs_uri_stem as file
-  | stats values(file) as file by Source_Network_Address
-  | rename Source_Network_Address as attacker_ip
+  index=iis host=WEB sc_status=200 (cs_uri_stem="*.bak" OR cs_uri_stem="*.old" OR cs_uri_stem="*.backup" OR cs_uri_stem="*.save" OR cs_uri_stem="*.orig" OR cs_uri_stem="*.config" OR cs_uri_stem="*~") `detection_window`
+  | stats values(cs_uri_stem) as file by c_ip
+  | rename c_ip as attacker_ip
   | table attacker_ip file
 how_to_implement: >-
   Requires IIS log forwarding from `web` -- landed in `index=iis` via the
@@ -45,6 +44,16 @@ known_false_positives: >-
   the extension filter. If a future deployment legitimately serves a `.config`
   asset (unusual), scope the bare-`.config` clause out. Verified no benign
   hits over the baseline IIS traffic on `web`.
+throttle: [attacker_ip]
+changes_2026_09_30: >-
+  Index-time window like the rest (was the event-time minute before last,
+  which already allowed for IIS's ~40s delivery lag). Runs every minute
+  over the events indexed in the previous minute (`detection_window`), so
+  an event is evaluated however late it arrives; before this, each run
+  searched the last minute of event time, and anything indexed after its
+  run (Security up to ~50s late, Zeek conn p90 ~1 min) was never
+  evaluated. Each result row is its own alert, throttled for 5m on the
+  `throttle` fields.
 verification:
   date: '2026-09-29'
   method: Live attack execution against the cyberhawks.lab range
@@ -66,15 +75,4 @@ embed:
 references:
   - 'detections/backlog.md, "Web application" (backlog row: "Web.config.bak credential leak")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  # Trailing 1-minute window, every minute. `latest=-1m` (not `now`) ends the
-  # window a minute in the past so the IIS log line has time to flush + forward
-  # + index (~38s end-to-end with HTTP.SYS buffering disabled -- see
-  # cyber-range iis_log_buffering) before the window that contains it is
-  # evaluated; the windows are contiguous and non-overlapping, so each hit is
-  # evaluated exactly once and successive reads in different minutes alert
-  # separately rather than merging into one large bucket.
-  cron: '* * * * *'
-  earliest: '-2m'
-  latest: '-1m'
 disabled: false

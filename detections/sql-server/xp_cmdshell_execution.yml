@@ -1,6 +1,6 @@
 name: xp_cmdshell Execution
 id: sql-server-xp-cmdshell
-version: 4
+version: 5
 date: '2026-09-30'
 status: production
 category: sql-server
@@ -15,20 +15,19 @@ data_source:
     SQL Server Extended Events (`detection_sql_text` session), sql_text
     matching xp_cmdshell
 search: |-
-  index=mssql sourcetype=mssql_xe_text sql_text="*xp_cmdshell*" NOT username="svc-sqlmonitor" NOT username="NT SERVICE*"
+  index=mssql sourcetype=mssql_xe_text sql_text="*xp_cmdshell*" NOT username="svc-sqlmonitor" NOT username="NT SERVICE*" `detection_window`
   | eval event_epoch=strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z")
   | where isnotnull(event_epoch) AND _time - event_epoch <= 600
   | eval host=replace(source, "_mssql_xe_text", "")
   | rename username as user, sql_text as command
   | lookup known_range_hosts hostname AS host OUTPUT ip AS host_ip
-  | join type=left host session_id [ search index=mssql sourcetype=mssql_audit action_id=LGIS earliest=-7d latest=now | eval host=replace(source, "_mssql_audit", ""), login=tostring(floor(strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z"))) . "|" . client_address | stats values(login) as logins by host session_id | eval logins=mvjoin(logins, ";") ]
+  | join type=left host session_id [ search index=mssql sourcetype=mssql_audit action_id=LGIS earliest=-7d latest=+5m | eval host=replace(source, "_mssql_audit", ""), login=tostring(floor(strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z"))) . "|" . client_address | stats values(login) as logins by host session_id | eval logins=mvjoin(logins, ";") ]
   | eval logins=split(logins, ";")
   | eval prior_logins=mvmap(logins, if(tonumber(mvindex(split(logins, "|"), 0)) <= event_epoch + 1, logins, null()))
-  | eval Source_Network_Address=mvindex(split(mvindex(mvsort(prior_logins), -1), "|"), 1)
-  | eval Source_Network_Address=if(Source_Network_Address="local machine", host_ip, Source_Network_Address)
-  | rename Source_Network_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | eval attacker_ip=mvindex(split(mvindex(mvsort(prior_logins), -1), "|"), 1)
+  | eval attacker_ip=if(attacker_ip="local machine", host_ip, attacker_ip)
+  | `normalize_host(host)`
+  | `normalize_user(user)`
   | table attacker_ip host user command
 how_to_implement: >-
   Requires defense-tooling's DB Connect setup already forwarding
@@ -89,6 +88,16 @@ known_false_positives: >-
   one ;-joined string: `join` flattens a multivalue field into a single
   newline-joined value, which made the first live test pick the wrong
   login.)
+throttle: [attacker_ip, host, command]
+changes_2026_09_30: >-
+  Still one row per command; the throttle key is the command, so each
+  distinct command alerts and an identical repeat within 5m doesn't. Runs
+  every minute over the events indexed in the previous minute
+  (`detection_window`), so an event is evaluated however late it arrives;
+  before this, each run searched the last minute of event time, and
+  anything indexed after its run (Security up to ~50s late, Zeek conn p90
+  ~1 min) was never evaluated. Each result row is its own alert, throttled
+  for 5m on the `throttle` fields.
 verification:
   date: '2026-09-27'
   reverification_2026_09_29: >-
@@ -129,8 +138,4 @@ embed:
 references:
   - 'detections/backlog.md, "SQL Server" (backlog row: "xp_cmdshell execution")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

@@ -1,6 +1,6 @@
 name: Scheduled Task Creation (Local)
 id: host-persistence-scheduled-task-local
-version: 5
+version: 6
 date: '2026-09-30'
 status: production
 category: host-persistence
@@ -16,10 +16,9 @@ data_source:
     Windows Events -- 4698 (scheduled task created) with no correlated 4624
     (Logon Type 3) on the same host in the same window
 search: |-
-  index=windows EventCode=4698
-  | rex field=ComputerName "(?<host_key>[^.]+)"
-  | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
-  | eval host_key=lower(host_key), session_id=lower(session_id), acct=lower(Subject_Account_Name)
+  index=windows EventCode=4698 `detection_window`
+  | `subject_session`
+  | eval acct=lower(Subject_Account_Name)
   | rex field=_raw "Security ID:\s+(?<subject_sid>S-[0-9-]+)"
   | rex field=_raw "<URI>(?<task_uri>[^<]*)</URI>"
   | rex field=_raw "<UserId>(?<task_principal>[^<]*)</UserId>"
@@ -29,8 +28,8 @@ search: |-
   | rex field=_raw "<Arguments>(?<task_args>[^<]*)</Arguments>"
   | eval defender_scan=if(session_id="0x3e7" AND subject_sid="S-1-5-18" AND Task_Name="\\Microsoft\\Windows\\Windows Defender\\Windows Defender Scheduled Scan" AND task_uri=Task_Name AND task_principal="S-1-5-18" AND task_context="LocalSystem" AND mvcount(task_action)=1 AND task_action="Exec" AND match(task_cmd, "^C:\\\\ProgramData\\\\Microsoft\\\\Windows Defender\\\\Platform\\\\[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\\\\MpCmdRun\.exe$") AND task_args="Scan -ScheduleJob -ScanTrigger 55 -IdleScheduledJob", 1, 0)
   | where defender_scan=0
-  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Logon_Type) as subj_type latest(Source_Network_Address) as exact_src latest(_time) as subj_time by host_key session_id ]
-  | join type=left host_key acct [ search index=windows EventCode=4624 Logon_Type=3 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","10.0.2.1","127.0.0.1","::1","0.0.0.0") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), acct=lower(mvindex(Account_Name,-1)), logon=tostring(floor(_time)) . "|" . Source_Network_Address | stats values(logon) as fb_logons by host_key acct | eval fb_logons=mvjoin(fb_logons, ";") ]
+  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-4h latest=+5m | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Logon_Type) as subj_type latest(Source_Network_Address) as exact_src latest(_time) as subj_time by host_key session_id ]
+  | join type=left host_key acct [ search index=windows EventCode=4624 Logon_Type=3 earliest=-4h latest=+5m Source_Network_Address=* NOT Source_Network_Address IN ("-","10.0.2.1","127.0.0.1","::1","0.0.0.0") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), acct=lower(mvindex(Account_Name,-1)), logon=tostring(floor(_time)) . "|" . Source_Network_Address | stats values(logon) as fb_logons by host_key acct | eval fb_logons=mvjoin(fb_logons, ";") ]
   | eval fb_logons=split(fb_logons, ";")
   | eval fb_pair=mvmap(fb_logons, if(abs(tonumber(mvindex(split(fb_logons, "|"), 0)) - floor(subj_time)) <= 2, fb_logons, null()))
   | eval fb_src=mvindex(split(mvindex(mvsort(fb_pair), -1), "|"), 1)
@@ -38,14 +37,11 @@ search: |-
   | eval src=coalesce(exact_src, fb_src)
   | eval path=case(subj_type!=3,"local", src=="10.0.2.1" OR isnull(src),"admin", true(),"lateral")
   | where path="local"
-  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
-  | bucket _time span=1m
-  | stats values(Subject_Account_Name) as user values(host_ip) as host_ip by _time host_key Task_Name
-  | eval Source_Network_Address=host_ip
+  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS attacker_ip
+  | stats values(attacker_ip) as attacker_ip values(Subject_Account_Name) as user by host_key Task_Name
   | rename host_key as host, Task_Name as task
-  | rename Source_Network_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | `normalize_host(host)`
+  | `normalize_user(user)`
   | table attacker_ip host user task
 how_to_implement: >-
   No infra fix needed -- shares its data source with Lateral Movement:
@@ -93,6 +89,16 @@ known_false_positives: >-
   source-bearing logon in the previous 2 minutes, which could name another
   client using that account. It now requires that logon to be within 2
   seconds of the acting session's own logon on the same host.
+throttle: [attacker_ip, host, task]
+changes_2026_09_30: >-
+  One row per host and task (the minute bucket is gone). The subject
+  session and host-IP lookups use the shared macros. Runs every minute
+  over the events indexed in the previous minute (`detection_window`), so
+  an event is evaluated however late it arrives; before this, each run
+  searched the last minute of event time, and anything indexed after its
+  run (Security up to ~50s late, Zeek conn p90 ~1 min) was never
+  evaluated. Each result row is its own alert, throttled for 5m on the
+  `throttle` fields.
 verification:
   date: '2026-09-27'
   reverification_2026_09_30: >-
@@ -128,8 +134,4 @@ embed:
 references:
   - 'detections/backlog.md, "Host persistence" (backlog row: "Local scheduled task persistence")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

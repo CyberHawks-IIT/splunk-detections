@@ -1,6 +1,6 @@
 name: Name Resolution Poisoning
 id: recon-name-resolution-poisoning
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: reconnaissance
@@ -17,21 +17,21 @@ description: >-
 data_source:
   - Zeek conn.log, UDP port 5355 (LLMNR), 5353 (mDNS) or 137 (NBNS): the target's broadcast/multicast query plus the unicast reply to it
 search: |-
-  index=zeek sourcetype=zeek:conn proto=udp (id_resp_p=5355 OR id_resp_p=5353 OR id_resp_p=137 OR id_orig_p=5355 OR id_orig_p=5353 OR id_orig_p=137)
+  index=zeek sourcetype=zeek:conn proto=udp (id_resp_p=5355 OR id_resp_p=5353 OR id_resp_p=137 OR id_orig_p=5355 OR id_orig_p=5353 OR id_orig_p=137) earliest=-30m latest=+5m
+  | eval new_event=if(`in_detection_window(_indextime)`, 1, 0)
   | eval protocol=case(id_resp_p=5355 OR id_orig_p=5355, "LLMNR", id_resp_p=5353 OR id_orig_p=5353, "mDNS", true(), "NBNS")
   | eval conn_ts=tonumber(ts), is_query=if(like(id_resp_h, "224.0.0.%") OR like(id_resp_h, "ff02:%") OR like(id_resp_h, "%.255"), 1, 0)
   | eval querier=if(is_query=1, id_orig_h, mvappend(id_orig_h, id_resp_h))
   | mvexpand querier
-  | eval responder=if(is_query=1, null(), if(querier=id_orig_h, id_resp_h, id_orig_h)), query_ts=if(is_query=1, conn_ts, null())
-  | eventstats values(query_ts) as query_times by querier protocol
+  | eval responder=if(is_query=1, null(), if(querier=id_orig_h, id_resp_h, id_orig_h)), query_ts=if(is_query=1, conn_ts, null()), new_query_ts=if(is_query=1 AND new_event=1, conn_ts, null())
+  | eventstats values(query_ts) as query_times values(new_query_ts) as new_query_times by querier protocol
   | where isnotnull(responder) AND isnotnull(query_times)
-  | eval answered=mvmap(query_times, if(conn_ts>=query_times-1 AND conn_ts<=query_times+5, 1, null()))
-  | where isnotnull(answered)
+  | eval answered=mvmap(query_times, if(conn_ts>=query_times-1 AND conn_ts<=query_times+5, 1, null())), answered_new=mvmap(new_query_times, if(conn_ts>=new_query_times-1 AND conn_ts<=new_query_times+5, 1, null()))
+  | where isnotnull(answered) AND (new_event=1 OR isnotnull(answered_new))
+  | stats values(protocol) as protocols by responder querier
   | rename responder as attacker_ip, querier as target
-  | bucket _time span=1m
-  | stats values(protocol) as protocols by _time attacker_ip target
   | lookup known_range_hosts ip AS target OUTPUT hostname AS target_name | eval target=coalesce(target_name, target)
-  | eval target=if(isnull(target), null(), mvmap(target, if(match(target, "^[0-9.]+$") OR like(target, "%:%"), target, lower(replace(target, "\..*$", "")))))
+  | `normalize_host(target)`
   | table attacker_ip target protocols
 how_to_implement: >-
   Required a real, significant infra fix, not just a config tweak:
@@ -89,6 +89,21 @@ known_false_positives: >-
   poisoning. The `ports` field became `protocols` (LLMNR/mDNS/NBNS). `name`
   and `ip` remain unobtainable: Zeek writes no dns.log rows for these ports
   and has no NBNS/LLMNR/mDNS log at all (re-confirmed 2026-09-30).
+throttle: [attacker_ip, target]
+changes_2026_09_30: >-
+  Zeek writes a UDP flow only after ~1 minute of inactivity, so the query
+  and the poisoned reply reach Splunk a minute or more after they happen,
+  and not necessarily in the same minute: under the old
+  last-minute-of-event-time schedule this detection almost never saw them
+  live. Now it pairs queries and replies over the last 30 minutes and
+  alerts on a pair when either half is newly indexed (the throttle absorbs
+  the second half). The minute bucket is gone: one row per poisoner and
+  target. Runs every minute and looks back 30 minutes, so an event
+  arriving up to 30 minutes late is still evaluated; before this, each run
+  searched the last minute of event time, and anything indexed after its
+  run (Security up to ~50s late, Zeek conn p90 ~1 min) was never
+  evaluated. Each result row is its own alert, throttled for 5m on the
+  `throttle` fields.
 verification:
   date: '2026-09-27'
   reverification_2026_09_30: >-
@@ -121,8 +136,4 @@ embed:
 references:
   - 'detections/backlog.md, "Reconnaissance & discovery" (backlog row: "Name resolution poisoning (LLMNR / NBT-NS / mDNS)")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

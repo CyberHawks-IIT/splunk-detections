@@ -1,6 +1,6 @@
 name: SMB Share Access
 id: credential-exposure-smb-share-access
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: credential-exposure
@@ -14,12 +14,11 @@ description: >-
 data_source:
   - Windows Events -- 5145, Share Name = \\*\Shared (sql1)
 search: |-
-  index=windows EventCode=5145 Share_Name="\\\\*\\Shared"
+  index=windows EventCode=5145 Share_Name="\\\\*\\Shared" `detection_window`
   | eval share=mvindex(split(Share_Name, "\\"), -1)
-  | bucket _time span=1m
-  | stats values(share) as share values(ComputerName) as host by _time Source_Address
+  | stats values(share) as share values(ComputerName) as host by Source_Address
   | rename Source_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
+  | `normalize_host(host)`
   | table attacker_ip host share
 how_to_implement: >-
   Same infra fix as NETLOGON Share Read / SYSVOL Share Read -- "Detailed
@@ -30,6 +29,15 @@ known_false_positives: >-
   None -- zero access to sql1's Shared share of any kind in 24h of range
   background traffic before this session's live test (most of that window
   predates the audit-policy fix, so this baseline is short).
+throttle: [attacker_ip]
+changes_2026_09_30: >-
+  One row per source (the minute bucket is gone). Runs every minute over
+  the events indexed in the previous minute (`detection_window`), so an
+  event is evaluated however late it arrives; before this, each run
+  searched the last minute of event time, and anything indexed after its
+  run (Security up to ~50s late, Zeek conn p90 ~1 min) was never
+  evaluated. Each result row is its own alert, throttled for 5m on the
+  `throttle` fields.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
@@ -48,8 +56,4 @@ embed:
 references:
   - 'detections/backlog.md, "Credential exposure" (backlog row: "File share dump")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

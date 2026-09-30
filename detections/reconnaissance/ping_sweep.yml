@@ -1,6 +1,6 @@
 name: Ping Sweep
 id: recon-ping-sweep
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: reconnaissance
@@ -9,14 +9,16 @@ description: >-
 data_source:
   - Zeek conn.log (proto=icmp)
 search: |-
-  index=zeek sourcetype=zeek:conn proto=icmp
-  | bucket _time span=10s
+  index=zeek sourcetype=zeek:conn proto=icmp earliest=-30m latest=+5m
+  | eval new_event=if(`in_detection_window(_indextime)`, 1, 0)
   | lookup known_range_hosts ip AS id_resp_h OUTPUT hostname AS resp_name
   | eval resp_host=coalesce(resp_name, id_resp_h)
-  | stats dc(id_resp_h) as distinct_hosts values(resp_host) as hosts by _time id_orig_h
-  | where distinct_hosts>=5
+  | sort 0 _time
+  | streamstats time_window=10s dc(id_resp_h) as distinct_hosts values(resp_host) as hosts max(new_event) as has_new by id_orig_h
+  | where distinct_hosts>=5 AND has_new=1
+  | stats values(hosts) as hosts by id_orig_h
   | rename id_orig_h as attacker_ip
-  | eval hosts=if(isnull(hosts), null(), mvmap(hosts, if(match(hosts, "^[0-9.]+$") OR like(hosts, "%:%"), hosts, lower(replace(hosts, "\..*$", "")))))
+  | `normalize_host(hosts)`
   | table attacker_ip hosts
 how_to_implement: >-
   Requires defense-tooling's Zeek sensor forwarding conn.log, plus this
@@ -28,6 +30,20 @@ known_false_positives: >-
   None found over 1h of normal range background traffic. IPv6 router
   solicitation ICMP (to ff02::2) doesn't touch 5+ distinct unicast hosts,
   so it doesn't trip this.
+throttle: [attacker_ip]
+changes_2026_09_30: >-
+  Sliding 10s window per source instead of fixed 10s buckets: a sweep that
+  straddled a bucket boundary could fall under 5 hosts in both halves and
+  never fire (the original verification already saw a 7-host sweep split
+  6+1 across two buckets). It counts the last 30 minutes of ICMP and
+  alerts when a window that reaches 5 hosts includes a newly indexed flow,
+  so a sweep is judged whole however its flows are spread over indexing
+  minutes. Runs every minute and looks back 30 minutes, so an event
+  arriving up to 30 minutes late is still evaluated; before this, each run
+  searched the last minute of event time, and anything indexed after its
+  run (Security up to ~50s late, Zeek conn p90 ~1 min) was never
+  evaluated. Each result row is its own alert, throttled for 5m on the
+  `throttle` fields.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
@@ -44,8 +60,4 @@ embed:
 references:
   - detections/backlog.md, "Reconnaissance & discovery"
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

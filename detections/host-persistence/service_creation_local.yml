@@ -1,6 +1,6 @@
 name: Service Creation (Local)
 id: host-persistence-service-creation-local
-version: 5
+version: 6
 date: '2026-09-30'
 status: production
 category: host-persistence
@@ -15,17 +15,17 @@ data_source:
     Windows Events -- 7045 (service installed) with no correlated 4624
     (Logon Type 3) on the same host in the same window
 search: |-
-  index=windows (EventCode=4697 OR EventCode=7045)
+  index=windows (EventCode=4697 OR EventCode=7045) earliest=-30m latest=+5m
   | eval svc_type=tonumber(replace(Service_Type, "^0x", ""), 16)
   | where isnull(svc_type) OR floor(svc_type/128)%2=0
   | rex field=ComputerName "(?<host_key>[^.]+)"
   | rex field=_raw "Logon ID:\s+(?<sid>0x[0-9A-Fa-f]+)"
   | eval host_key=lower(host_key)
-  | bin _time span=1m
-  | stats latest(eval(if(EventCode=4697,lower(sid),null()))) as session_id latest(eval(if(EventCode=4697,Subject_Account_Name,null()))) as subj_acct values(EventCode) as codes by _time host_key Service_Name
+  | stats min(_indextime) as first_indexed latest(eval(if(EventCode=4697,lower(sid),null()))) as session_id latest(eval(if(EventCode=4697,Subject_Account_Name,null()))) as subj_acct by host_key Service_Name
+  | where `in_detection_window(first_indexed)`
   | eval has_4697=if(isnull(session_id),0,1), acct=lower(subj_acct)
-  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Logon_Type) as subj_type latest(Source_Network_Address) as exact_src latest(_time) as subj_time by host_key session_id ]
-  | join type=left host_key acct [ search index=windows EventCode=4624 Logon_Type=3 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","10.0.2.1","127.0.0.1","::1","0.0.0.0") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), acct=lower(mvindex(Account_Name,-1)), logon=tostring(floor(_time)) . "|" . Source_Network_Address | stats values(logon) as fb_logons by host_key acct | eval fb_logons=mvjoin(fb_logons, ";") ]
+  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-4h latest=+5m | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Logon_Type) as subj_type latest(Source_Network_Address) as exact_src latest(_time) as subj_time by host_key session_id ]
+  | join type=left host_key acct [ search index=windows EventCode=4624 Logon_Type=3 earliest=-4h latest=+5m Source_Network_Address=* NOT Source_Network_Address IN ("-","10.0.2.1","127.0.0.1","::1","0.0.0.0") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), acct=lower(mvindex(Account_Name,-1)), logon=tostring(floor(_time)) . "|" . Source_Network_Address | stats values(logon) as fb_logons by host_key acct | eval fb_logons=mvjoin(fb_logons, ";") ]
   | eval fb_logons=split(fb_logons, ";")
   | eval fb_pair=mvmap(fb_logons, if(abs(tonumber(mvindex(split(fb_logons, "|"), 0)) - floor(subj_time)) <= 2, fb_logons, null()))
   | eval fb_src=mvindex(split(mvindex(mvsort(fb_pair), -1), "|"), 1)
@@ -33,12 +33,10 @@ search: |-
   | eval src=coalesce(exact_src, fb_src)
   | eval path=case(has_4697=1 AND subj_type!=3,"local", has_4697=1 AND (src=="10.0.2.1" OR isnull(src)),"admin", has_4697=1,"lateral", true(),"local")
   | where path="local"
-  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
-  | eval Source_Network_Address=host_ip
+  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS attacker_ip
   | rename host_key as host, Service_Name as service, subj_acct as user
-  | rename Source_Network_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | `normalize_host(host)`
+  | `normalize_user(user)`
   | table attacker_ip host user service
 how_to_implement: >-
   No infra fix needed -- shares its data source with Lateral Movement:
@@ -75,6 +73,19 @@ known_false_positives: >-
   source-bearing logon in the previous 2 minutes, which could name another
   client using that account. It now requires that logon to be within 2
   seconds of the acting session's own logon on the same host.
+throttle: [attacker_ip, host, service]
+changes_2026_09_30: >-
+  The 4697 (Security log) and 7045 (System log) of one install reach
+  Splunk through separate forwarder inputs, so they can be indexed in
+  different minutes; a minute bucket that caught only the 7045 misread a
+  lateral install as local. Each (host, service) is now evaluated once, in
+  the run that indexed its FIRST event, with everything indexed in the
+  minute since as context (`in_detection_window(first_indexed)`). Runs
+  every minute and looks back 30 minutes, so an event arriving up to 30
+  minutes late is still evaluated; before this, each run searched the last
+  minute of event time, and anything indexed after its run (Security up to
+  ~50s late, Zeek conn p90 ~1 min) was never evaluated. Each result row is
+  its own alert, throttled for 5m on the `throttle` fields.
 verification:
   date: '2026-09-27'
   reverification_2026_09_29: >-
@@ -102,8 +113,4 @@ embed:
 references:
   - 'detections/backlog.md, "Host persistence" (backlog row: "Malicious local service creation")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

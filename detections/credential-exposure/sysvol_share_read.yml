@@ -1,6 +1,6 @@
 name: SYSVOL Share Read
 id: credential-exposure-sysvol-share-read
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: credential-exposure
@@ -13,12 +13,11 @@ description: >-
 data_source:
   - Windows Events -- 5145, Share Name = \\*\SYSVOL, Relative Target Name matching *Groups.xml
 search: |-
-  index=windows EventCode=5145 Share_Name="\\\\*\\SYSVOL" Relative_Target_Name="*Groups.xml"
+  index=windows EventCode=5145 Share_Name="\\\\*\\SYSVOL" Relative_Target_Name="*Groups.xml" `detection_window`
   | where NOT match(Account_Name, "\$$")
-  | bucket _time span=1m
-  | stats values(Relative_Target_Name) as files values(ComputerName) as host by _time Source_Address
+  | stats values(Relative_Target_Name) as files values(ComputerName) as host by Source_Address
   | rename Source_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
+  | `normalize_host(host)`
   | table attacker_ip host files
 how_to_implement: >-
   Same infra fix as NETLOGON Share Read -- "Detailed File Share" auditing
@@ -38,6 +37,15 @@ known_false_positives: >-
   workstation refresh, but worth noting since it shows the file genuinely
   gets touched by non-attacker activity and the account-name exclusion is
   doing real work, not just defensive boilerplate.
+throttle: [attacker_ip]
+changes_2026_09_30: >-
+  One row per source (the minute bucket is gone). Runs every minute over
+  the events indexed in the previous minute (`detection_window`), so an
+  event is evaluated however late it arrives; before this, each run
+  searched the last minute of event time, and anything indexed after its
+  run (Security up to ~50s late, Zeek conn p90 ~1 min) was never
+  evaluated. Each result row is its own alert, throttled for 5m on the
+  `throttle` fields.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
@@ -57,8 +65,4 @@ embed:
 references:
   - 'detections/backlog.md, "Credential exposure" (backlog row: "GPP cpassword (SYSVOL)")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

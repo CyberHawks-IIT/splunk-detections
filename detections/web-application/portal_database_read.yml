@@ -1,6 +1,6 @@
 name: Database Credential Read (admin)
 id: web-application-portal-database-read
-version: 4
+version: 5
 date: '2026-09-30'
 status: production
 category: web-application
@@ -18,22 +18,20 @@ data_source:
     table read and excluding the app's own expected `svc-web`-from-`web`
     access pattern
 search: |-
-  index=mssql sourcetype=mssql_xe_text sql_text="*FROM Users*" NOT username="NT SERVICE*"
+  index=mssql sourcetype=mssql_xe_text sql_text="*FROM Users*" NOT username="NT SERVICE*" `detection_window`
   | eval event_epoch=strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z")
   | where isnotnull(event_epoch) AND _time - event_epoch <= 600
   | where NOT (username="svc-web" AND client_hostname="WEB")
   | eval host=replace(source, "_mssql_xe_text", "")
   | lookup known_range_hosts hostname AS host OUTPUT ip AS host_ip
-  | join type=left host session_id [ search index=mssql sourcetype=mssql_audit action_id=LGIS earliest=-7d latest=now | eval host=replace(source, "_mssql_audit", ""), login=tostring(floor(strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z"))) . "|" . client_address | stats values(login) as logins by host session_id | eval logins=mvjoin(logins, ";") ]
+  | join type=left host session_id [ search index=mssql sourcetype=mssql_audit action_id=LGIS earliest=-7d latest=+5m | eval host=replace(source, "_mssql_audit", ""), login=tostring(floor(strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z"))) . "|" . client_address | stats values(login) as logins by host session_id | eval logins=mvjoin(logins, ";") ]
   | eval logins=split(logins, ";")
   | eval prior_logins=mvmap(logins, if(tonumber(mvindex(split(logins, "|"), 0)) <= event_epoch + 1, logins, null()))
-  | eval Source_Network_Address=mvindex(split(mvindex(mvsort(prior_logins), -1), "|"), 1)
-  | eval Source_Network_Address=if(Source_Network_Address="local machine", host_ip, Source_Network_Address)
-  | bucket _time span=1m
-  | stats values(Source_Network_Address) as Source_Network_Address by _time username
+  | eval attacker_ip=mvindex(split(mvindex(mvsort(prior_logins), -1), "|"), 1)
+  | eval attacker_ip=if(attacker_ip="local machine", host_ip, attacker_ip)
+  | stats values(attacker_ip) as attacker_ip by host session_id username
   | rename username as user
-  | rename Source_Network_Address as attacker_ip
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | `normalize_user(user)`
   | table attacker_ip user
 how_to_implement: >-
   No infra fix needed for the detection itself -- the `detection_sql_text`
@@ -102,6 +100,15 @@ known_false_positives: >-
   one ;-joined string: `join` flattens a multivalue field into a single
   newline-joined value, which made the first live test pick the wrong
   login.)
+throttle: [attacker_ip, user]
+changes_2026_09_30: >-
+  Grouped by SQL session (host + session_id) instead of login+minute, so
+  two attackers using one login are separate alerts. Runs every minute over the events indexed in the
+  previous minute (`detection_window`), so an event is evaluated however
+  late it arrives; before this, each run searched the last minute of event
+  time, and anything indexed after its run (Security up to ~50s late, Zeek
+  conn p90 ~1 min) was never evaluated. Each result row is its own alert,
+  throttled for 5m on the `throttle` fields.
 verification:
   reverification_2026_09_30_session: >-
     Session-based attacker IP, two concurrent attackers on sql1, both as
@@ -165,8 +172,4 @@ embed:
 references:
   - 'detections/backlog.md, "Web application" (backlog row: "Portal database read via leaked or permissive credentials")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

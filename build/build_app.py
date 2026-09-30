@@ -17,7 +17,17 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DETECTIONS_GLOB = os.path.join(REPO_ROOT, "detections", "**", "*.yml")
 OUTPUT_PATH = os.path.join(REPO_ROOT, "app", "default", "savedsearches.conf")
 
-REQUIRED_FIELDS = ["name", "id", "search", "description", "verification", "schedule"]
+REQUIRED_FIELDS = ["name", "id", "search", "description", "verification", "throttle"]
+
+# Every detection runs every minute and evaluates the events indexed in the
+# `detection_window` macro's one-minute index-time window (see
+# app/default/macros.conf), so the event-time range below is only an outer
+# bound on how late an event can arrive and still be evaluated. latest is in
+# the future so a host whose clock runs a little fast isn't silently ignored.
+# A detection can override any of these with its own `schedule:` block.
+DEFAULT_SCHEDULE = {"cron": "* * * * *", "earliest": "-4h", "latest": "+5m"}
+# How long a fired attempt stays throttled (see render_stanza).
+DEFAULT_THROTTLE_PERIOD = "5m"
 
 HEADER = """\
 # GENERATED FILE -- do not hand-edit. Run build/build_app.py after changing
@@ -31,6 +41,7 @@ HEADER = """\
 #
 # Scheduled (disabled = false in the YAML -> disabled = 0 here) so each one
 # is visible under Activity > Triggered Alerts in Splunk web when it fires.
+# Each result row is its own alert, throttled on the YAML's `throttle` fields.
 #
 # Discord alerting: build with --discord to also wire each search to the
 # `discord_alert` custom alert action (defense-tooling installs that action
@@ -66,7 +77,10 @@ def render_search(search_text):
 def render_stanza(d, discord=False):
     search = render_search(d["search"])
     description = " ".join(d["description"].split())
-    schedule = d["schedule"]
+    schedule = {**DEFAULT_SCHEDULE, **(d.get("schedule") or {})}
+    throttle_fields = d["throttle"]
+    if isinstance(throttle_fields, str):
+        throttle_fields = [throttle_fields]
     disabled = "1" if d.get("disabled", True) else "0"
     stanza = (
         f"[{d['name']}]\n"
@@ -97,6 +111,16 @@ def render_stanza(d, discord=False):
         # ~8.5% of runs on a 1-core indexer (2026-09-30), and a skipped
         # window is an attack that never alerts or reaches Discord.
         f"realtime_schedule = 0\n"
+        # One alert per result row (alert.digest_mode = 0), each throttled on
+        # the detection's `throttle` fields -- the columns that identify one
+        # attempt (attacker + target/object). Two attackers, or one attacker
+        # against two targets, are separate rows and separate alerts. The
+        # throttle only stops the SAME attempt re-alerting: its later events
+        # indexed in the next window, or a burst re-evaluated as it grows.
+        f"alert.digest_mode = 0\n"
+        f"alert.suppress = 1\n"
+        f"alert.suppress.fields = {','.join(throttle_fields)}\n"
+        f"alert.suppress.period = {d.get('throttle_period', DEFAULT_THROTTLE_PERIOD)}\n"
     )
     if discord:
         # The stanza name is the embed title (this repo's convention: the
@@ -110,6 +134,8 @@ def render_stanza(d, discord=False):
         embed = d.get("embed", {})
         fields = embed.get("additional_fields", []) or []
         stanza += "action.discord_alert = 1\n"
+        # Per-result alerting: post just the row this invocation is for.
+        stanza += "action.discord_alert.param.per_result = 1\n"
         if fields:
             stanza += f"action.discord_alert.param.fields = {','.join(fields)}\n"
         if embed.get("attacker_field"):

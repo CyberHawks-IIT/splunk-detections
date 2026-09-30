@@ -1,6 +1,6 @@
 name: Pass-the-Ticket
 id: credential-dumping-pass-the-ticket
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: credential-dumping
@@ -16,9 +16,9 @@ data_source:
     set of IPs that have issued an AS-REQ for the same client principal
     within a 1-day lookback
 search: |-
-  index=zeek sourcetype=zeek:kerberos request_type=TGS service!="krbtgt/*"
+  index=zeek sourcetype=zeek:kerberos request_type=TGS service!="krbtgt/*" `detection_window`
   | join type=left client [
-      search index=zeek sourcetype=zeek:kerberos request_type=AS earliest=-1d
+      search index=zeek sourcetype=zeek:kerberos request_type=AS earliest=-1d latest=+5m
       | stats values(id_orig_h) as as_ips by client
     ]
   | eval already_known=if(isnull(as_ips), 0, if(mvfind(as_ips, id_orig_h)>=0, 1, 0))
@@ -26,9 +26,8 @@ search: |-
   | eval origin=mvindex(as_ips, 0)
   | lookup known_range_hosts ip AS origin OUTPUT hostname AS origin_name | eval origin=coalesce(origin_name, origin)
   | rename id_orig_h as destination
-  | bucket _time span=1m
-  | stats values(origin) as origin values(service) as service by _time client destination
-  | eval origin=if(isnull(origin), null(), mvmap(origin, if(match(origin, "^[0-9.]+$") OR like(origin, "%:%"), origin, lower(replace(origin, "\..*$", "")))))
+  | stats values(origin) as origin values(service) as service by client destination
+  | `normalize_host(origin)`
   | table client origin destination service
 how_to_implement: >-
   No infra fix needed for the detection logic itself -- Zeek's
@@ -74,6 +73,15 @@ known_false_positives: >-
   linked-server chain (sql1->sql2 uses static `sa`-credential mapping, not
   Kerberos protocol transition, per cyber-range's VULNERABLE_RANGE_PLAN.md
   Phase F) -- revisit if constrained delegation is ever legitimately added.
+throttle: [destination, client]
+changes_2026_09_30: >-
+  One row per reusing host and ticket owner (the minute bucket is gone).
+  Runs every minute over the events indexed in the previous minute
+  (`detection_window`), so an event is evaluated however late it arrives;
+  before this, each run searched the last minute of event time, and
+  anything indexed after its run (Security up to ~50s late, Zeek conn p90
+  ~1 min) was never evaluated. Each result row is its own alert, throttled
+  for 5m on the `throttle` fields.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
@@ -99,8 +107,4 @@ embed:
 references:
   - 'detections/backlog.md, "Credential & ticket dumping" (backlog row: "Pass-the-ticket / ticket reuse")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

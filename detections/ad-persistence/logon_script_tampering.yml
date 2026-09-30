@@ -1,6 +1,6 @@
 name: Logon Script Tampering
 id: ad-persistence-logon-script-tampering
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: ad-persistence
@@ -16,19 +16,13 @@ data_source:
     Windows Events -- 4663 (SACL, WriteData access to a file under
     SYSVOL\domain\scripts)
 search: |-
-  index=windows EventCode=4663 Object_Name="*\\scripts\\*" Accesses="WriteData*"
-  | rex field=ComputerName "(?<host_key>[^.]+)"
-  | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
-  | eval host_key=lower(host_key), session_id=lower(session_id)
-  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Source_Network_Address) as logon_src by host_key session_id ]
-  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
-  | eval Source_Network_Address=coalesce(logon_src, host_ip)
-  | bucket _time span=1m
-  | stats values(Object_Name) as script values(Source_Network_Address) as Source_Network_Address by _time ComputerName Subject_Account_Name
+  index=windows EventCode=4663 Object_Name="*\\scripts\\*" Accesses="WriteData*" `detection_window`
+  | `subject_session`
+  | `logon_source`
+  | stats values(Object_Name) as script by attacker_ip ComputerName Subject_Account_Name
   | rename ComputerName as host, Subject_Account_Name as user
-  | rename Source_Network_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | `normalize_host(host)`
+  | `normalize_user(user)`
   | table attacker_ip host user script
 how_to_implement: >-
   No infra fix needed this time -- the object SACL on
@@ -43,6 +37,15 @@ known_false_positives: >-
   admin updating a logon script) would also trigger this -- acceptable
   since this range has no ongoing script maintenance workflow to
   distinguish from an attack.
+throttle: [attacker_ip, host, user]
+changes_2026_09_30: >-
+  Grouped by attacker (was by host+user+minute, so two attackers using the
+  same account merged into one alert). Runs every minute over the events
+  indexed in the previous minute (`detection_window`), so an event is
+  evaluated however late it arrives; before this, each run searched the
+  last minute of event time, and anything indexed after its run (Security
+  up to ~50s late, Zeek conn p90 ~1 min) was never evaluated. Each result
+  row is its own alert, throttled for 5m on the `throttle` fields.
 verification:
   date: '2026-09-27'
   reverification_2026_09_29: >-
@@ -69,8 +72,4 @@ embed:
 references:
   - 'detections/backlog.md, "AD persistence & privilege escalation" (backlog row: "Logon script tampering")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

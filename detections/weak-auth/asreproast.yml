@@ -1,6 +1,6 @@
 name: AS-REP Roast
 id: weak-auth-asreproast
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: weak-auth
@@ -16,12 +16,10 @@ description: >-
 data_source:
   - 'Windows Events -- 4768, Pre-Authentication Type = 0'
 search: |-
-  index=windows EventCode=4768 Pre_Authentication_Type=0
-  | eval Client_Address=replace(Client_Address, "^::ffff:", "")
-  | bucket _time span=1m
-  | stats values(Account_Name) as users by _time Client_Address
-  | rename Client_Address as attacker_ip
-  | eval users=if(isnull(users), null(), mvmap(users, replace(replace(users, "^.*\\\\", ""), "@.*$", "")))
+  index=windows EventCode=4768 Pre_Authentication_Type=0 `detection_window`
+  | eval attacker_ip=replace(Client_Address, "^::ffff:", "")
+  | stats values(Account_Name) as users by attacker_ip
+  | `normalize_user(users)`
   | table attacker_ip users
 how_to_implement: >-
   Requires defense-tooling's Windows forwarder shipping Security log 4768
@@ -38,6 +36,15 @@ known_false_positives: >-
   vulnerability being detected (the account itself is the weakness, not a
   particular request), matching how the backlog/planner scoped this
   detection (no additional filtering called for).
+throttle: [attacker_ip]
+changes_2026_09_30: >-
+  One row per source (the minute bucket is gone). Runs every minute over
+  the events indexed in the previous minute (`detection_window`), so an
+  event is evaluated however late it arrives; before this, each run
+  searched the last minute of event time, and anything indexed after its
+  run (Security up to ~50s late, Zeek conn p90 ~1 min) was never
+  evaluated. Each result row is its own alert, throttled for 5m on the
+  `throttle` fields.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
@@ -56,8 +63,4 @@ embed:
 references:
   - 'detections/backlog.md, "Weak / missing authentication" (backlog row: "ASREPRoast")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

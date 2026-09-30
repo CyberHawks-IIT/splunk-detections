@@ -1,6 +1,6 @@
 name: Machine Account Creation
 id: ad-persistence-machine-account-creation
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: ad-persistence
@@ -14,18 +14,12 @@ description: >-
 data_source:
   - Windows Events -- 4741 (computer account created)
 search: |-
-  index=windows EventCode=4741
-  | rex field=ComputerName "(?<host_key>[^.]+)"
-  | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
-  | eval host_key=lower(host_key), session_id=lower(session_id)
-  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Source_Network_Address) as logon_src by host_key session_id ]
-  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
-  | eval Source_Network_Address=coalesce(logon_src, host_ip)
-  | bucket _time span=1m
-  | stats values(Subject_Account_Name) as user values(Source_Network_Address) as Source_Network_Address by _time SAM_Account_Name
+  index=windows EventCode=4741 `detection_window`
+  | `subject_session`
+  | `logon_source`
+  | stats values(Subject_Account_Name) as user by attacker_ip SAM_Account_Name
   | rename SAM_Account_Name as account
-  | rename Source_Network_Address as attacker_ip
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | `normalize_user(user)`
   | table attacker_ip user account
 how_to_implement: >-
   No infra fix needed -- 4741 auditing (Computer Account Management,
@@ -42,6 +36,14 @@ known_false_positives: >-
   field at all, so the Attacker-lookup embed field can't be populated from
   this event alone; `user` (the creating account) is the available
   attribution.
+throttle: [attacker_ip, account]
+changes_2026_09_30: >-
+  One row per attacker and created account. Runs every minute over the
+  events indexed in the previous minute (`detection_window`), so an event
+  is evaluated however late it arrives; before this, each run searched the
+  last minute of event time, and anything indexed after its run (Security
+  up to ~50s late, Zeek conn p90 ~1 min) was never evaluated. Each result
+  row is its own alert, throttled for 5m on the `throttle` fields.
 verification:
   date: '2026-09-27'
   reverification_2026_09_29: >-
@@ -70,8 +72,4 @@ embed:
 references:
   - 'detections/backlog.md, "AD persistence & privilege escalation" (backlog row: "Rogue machine account creation")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

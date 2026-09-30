@@ -1,6 +1,6 @@
 name: 'Delegation: S4U2Proxy'
 id: delegation-s4u2proxy
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: delegation
@@ -24,7 +24,7 @@ data_source:
     neither of which the Windows 4769 event carries. Correlated on attacker
     IP + event second.
 search: |-
-  index=windows EventCode=4769
+  index=windows EventCode=4769 `detection_window`
   | rex field=_raw "Transited Services:\s*(?<transited>[^\r\n]+)"
   | where isnotnull(transited) AND transited!="-"
   | eval attacker_ip=replace(Client_Address,"^::ffff:","")
@@ -37,8 +37,8 @@ search: |-
       | stats values(imp) as impersonated values(eval(if(like(service,"%/%"),service,null()))) as service_spn by tkey ]
   | eval service=coalesce(service_spn, service)
   | stats values(attacker_ip) as attacker_ip values(user) as user values(impersonated) as impersonated by logon_guid service
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
-  | eval impersonated=if(isnull(impersonated), null(), mvmap(impersonated, replace(replace(impersonated, "^.*\\\\", ""), "@.*$", "")))
+  | `normalize_user(user)`
+  | `normalize_user(impersonated)`
   | table attacker_ip user service impersonated
 how_to_implement: >-
   No infra fix needed -- 4769 from the DCs is already forwarded, and Zeek's
@@ -68,6 +68,16 @@ known_false_positives: >-
   `impersonated` may be blank and `service` falls back to the machine
   account name -- the detection still fires on the Windows 4769 signal
   either way.
+throttle: [attacker_ip, user, service]
+changes_2026_09_30: >-
+  Now runs every minute like the rest (was every 5 minutes over 5 minutes
+  of event time). Still one row per Logon GUID and service. Runs every
+  minute over the events indexed in the previous minute
+  (`detection_window`), so an event is evaluated however late it arrives;
+  before this, each run searched the last minute of event time, and
+  anything indexed after its run (Security up to ~50s late, Zeek conn p90
+  ~1 min) was never evaluated. Each result row is its own alert, throttled
+  for 5m on the `throttle` fields.
 verification:
   date: '2026-09-29'
   method: Live attack execution against the cyberhawks.lab range
@@ -91,8 +101,4 @@ embed:
 references:
   - 'detections/backlog.md, "AD persistence & privilege escalation" (constrained delegation abuse)'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '*/5 * * * *'
-  earliest: '-5m'
-  latest: now
 disabled: false

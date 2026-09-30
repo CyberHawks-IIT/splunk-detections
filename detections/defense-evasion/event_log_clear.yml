@@ -1,6 +1,6 @@
 name: Event Log Clear
 id: defense-evasion-event-log-clear
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: defense-evasion
@@ -19,22 +19,18 @@ data_source:
   - Windows Event 4624 (the remote logon that opened the clearing session),
     for attacker_ip
 search: |-
-  index=windows (EventCode=1102 OR EventCode=104)
+  index=windows (EventCode=1102 OR EventCode=104) `detection_window`
   | rex field=_raw "The (?<logcleared>.+?) log file was cleared"
   | eval logcleared=coalesce(logcleared, if(EventCode=1102, "Security", null()))
-  | rex field=ComputerName "(?<host>[^.]+)"
-  | eval host_key=lower(host)
-  | rex field=_raw "Logon ID:\s+(?<session_id>0x[0-9A-Fa-f]+)"
   | rex field=_raw "Security ID:\s+(?<subject_sid>S-[0-9-]+)"
-  | eval session_id=lower(session_id), sid=coalesce(Sid, subject_sid)
-  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Source_Network_Address) as session_src by host_key session_id ]
-  | join type=left host_key sid [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), sid=mvindex(Security_ID,-1), sid_user=mvindex(Account_Name,-1) | stats latest(Source_Network_Address) as sid_src latest(sid_user) as sid_user by host_key sid ]
-  | lookup known_range_hosts hostname AS host_key OUTPUT ip AS host_ip
-  | eval attacker_ip=coalesce(session_src, sid_src, host_ip), user=coalesce(Account_Name, sid_user)
-  | bucket _time span=1m
-  | stats values(attacker_ip) as attacker_ip values(user) as user values(logcleared) as logs by _time host
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | eval sid=coalesce(Sid, subject_sid)
+  | `subject_session`
+  | `logon_source`
+  | join type=left host_key sid [ search index=windows EventCode=4624 earliest=-4h latest=+5m Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), sid=mvindex(Security_ID,-1), sid_user=mvindex(Account_Name,-1) | stats latest(Source_Network_Address) as sid_src latest(sid_user) as sid_user by host_key sid ]
+  | eval attacker_ip=coalesce(logon_src, sid_src, host_ip), user=coalesce(Account_Name, sid_user)
+  | stats values(user) as user values(logcleared) as logs by attacker_ip host_key
+  | rename host_key as host
+  | `normalize_user(user)`
   | table attacker_ip host user logs
 how_to_implement: >-
   No infra fix needed -- both event types were already forwarded (1102 in
@@ -78,6 +74,17 @@ known_false_positives: >-
   detections. Also fixed: log names containing spaces (e.g.
   "Microsoft-Windows-Windows Defender/Operational") never matched the
   `logs` regex. `host` added to the embed.
+throttle: [attacker_ip, host]
+changes_2026_09_30: >-
+  Grouped by attacker and host (was by host+minute only, so two attackers
+  clearing logs on one host merged into one alert). Two LOCAL clears on
+  one host both resolve to the host's own IP and still merge (user shows
+  both). Runs every minute over the events indexed in the previous minute
+  (`detection_window`), so an event is evaluated however late it arrives;
+  before this, each run searched the last minute of event time, and
+  anything indexed after its run (Security up to ~50s late, Zeek conn p90
+  ~1 min) was never evaluated. Each result row is its own alert, throttled
+  for 5m on the `throttle` fields.
 verification:
   date: '2026-09-27'
   reverification_2026_09_30: >-
@@ -105,8 +112,4 @@ embed:
 references:
   - 'detections/backlog.md, "Defense evasion" (backlog row: "Event log clearing")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

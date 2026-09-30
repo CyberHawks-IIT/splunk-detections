@@ -1,6 +1,6 @@
 name: Shadow Dump
 id: linux-shadow-dump
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: linux
@@ -16,7 +16,7 @@ data_source:
     (`-w /etc/shadow -p r`) correlated by session ID (`ses`) to a
     `USER_LOGIN` event for the real source IP
 search: |-
-  index=linux key="shadow_read"
+  index=linux key="shadow_read" `detection_window`
   | rex field=_raw "ses=(?<ses>\d+)"
   | rex field=_raw "AUID=\"(?<auid_name>[^\"]+)\""
   | rex field=_raw "comm=\"(?<comm>[^\"]+)\""
@@ -24,14 +24,12 @@ search: |-
   | join type=left ses [
       search index=linux "USER_LOGIN"
       | rex field=_raw "ses=(?<ses>\d+)"
-      | rex field=_raw "addr=(?<Source_Network_Address>[0-9.]+)"
-      | stats values(Source_Network_Address) as Source_Network_Address by ses
+      | rex field=_raw "addr=(?<attacker_ip>[0-9.]+)"
+      | stats values(attacker_ip) as attacker_ip by ses
     ]
-  | bucket _time span=1m
-  | stats values(comm) as tool values(Source_Network_Address) as Source_Network_Address values(auid_name) as user by _time host ses
-  | rename Source_Network_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | stats values(attacker_ip) as attacker_ip values(auid_name) as user by host ses
+  | `normalize_host(host)`
+  | `normalize_user(user)`
   | table attacker_ip host user
 how_to_implement: >-
   No infra fix needed -- the `-w /etc/shadow -p r -k shadow_read` auditd
@@ -54,6 +52,15 @@ known_false_positives: >-
   legitimate service is ever added to this host that opens `/etc/shadow`
   under a real user's login session, it would need adding to the `comm`
   exclude list the same way `unix_chkpwd` was.
+throttle: [attacker_ip, host, user]
+changes_2026_09_30: >-
+  One row per login session (the minute bucket is gone). Runs every minute
+  over the events indexed in the previous minute (`detection_window`), so
+  an event is evaluated however late it arrives; before this, each run
+  searched the last minute of event time, and anything indexed after its
+  run (Security up to ~50s late, Zeek conn p90 ~1 min) was never
+  evaluated. Each result row is its own alert, throttled for 5m on the
+  `throttle` fields.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
@@ -74,8 +81,4 @@ embed:
 references:
   - 'detections/backlog.md, "Linux (service-abuse host)" (backlog row: "/etc/shadow read")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

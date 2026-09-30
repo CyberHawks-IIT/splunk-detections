@@ -1,6 +1,6 @@
 name: Forced Authentication
 id: ntlm-forced-authentication
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: ntlm
@@ -22,22 +22,20 @@ data_source:
   - 'RPC Firewall (Application/RPCFW) EventID 3 on the coercion interface UUIDs -- caller IP, InterfaceUuid, subject'
   - 'Secondary: Zeek conn.log, DC as id_orig_h, destination port 445 or 139, excluding DC-to-DC (coercion effect)'
 search: |-
-  index=windows source="WinEventLog:RPCFW" EventCode=3
-  | rex field=_raw "Client Network Address:\s+(?<Source_Network_Address>[0-9a-fA-F.:]+)"
+  index=windows source="WinEventLog:RPCFW" EventCode=3 `detection_window`
+  | rex field=_raw "Client Network Address:\s+(?<attacker_ip>[0-9a-fA-F.:]+)"
   | rex field=_raw "InterfaceUuid:\s+(?<uuid>[0-9a-fA-F-]+)"
   | rex field=_raw "Security ID:\s+(?<user>[^\r\n]+)"
   | rex field=ComputerName "(?<host>[^.]+)"
   | eval type=case(uuid=="c681d488-d850-11d0-8c52-00c04fd90f7e" OR uuid=="df1941c5-fe89-4e79-bf10-463657acf44d","PetitPotam (MS-EFSR)", uuid=="4fc742e0-4a10-11cf-8273-00aa004ae673","DFSCoerce (MS-DFSNM)", uuid=="12345678-1234-abcd-ef00-0123456789ab","PrinterBug (MS-RPRN)", uuid=="a8e0653c-2744-4389-a61d-7373df8b2292","ShadowCoerce (MS-FSRVP)", true(),"coercion RPC ("+uuid+")")
   | append [
-      search index=zeek sourcetype=zeek:conn (id_orig_h=10.0.2.2 OR id_orig_h=10.0.2.3) (id_resp_p=445 OR id_resp_p=139) NOT (id_resp_h=10.0.2.2 OR id_resp_h=10.0.2.3)
+      search index=zeek sourcetype=zeek:conn (id_orig_h=10.0.2.2 OR id_orig_h=10.0.2.3) (id_resp_p=445 OR id_resp_p=139) NOT (id_resp_h=10.0.2.2 OR id_resp_h=10.0.2.3) `detection_window`
       | lookup known_range_hosts ip AS id_orig_h OUTPUT hostname AS host
-      | eval Source_Network_Address=id_resp_h, type="outbound SMB (coercion effect)", user=null()
+      | eval attacker_ip=id_resp_h, type="outbound SMB (coercion effect)"
     ]
-  | bucket _time span=1m
-  | stats values(type) as type values(user) as user by _time Source_Network_Address host
-  | rename Source_Network_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | stats values(type) as type values(user) as user by attacker_ip host
+  | `normalize_host(host)`
+  | `normalize_user(user)`
   | table attacker_ip host type user
 how_to_implement: >-
   Requires defense-tooling's Zeek sensor forwarding conn.log (already
@@ -118,6 +116,17 @@ known_false_positives: >-
   listener) is used as the Attacker-lookup field instead of the
   traditional "source of the malicious activity", since here the DC
   itself is the coerced victim, not the attacker.
+throttle: [attacker_ip, host]
+changes_2026_09_30: >-
+  One row per attacker and coerced host (the minute bucket is gone). The
+  RPC Firewall event and the DC's outbound SMB for one coercion can land
+  in different minutes; the throttle keeps that to one alert. Runs every
+  minute over the events indexed in the previous minute
+  (`detection_window`), so an event is evaluated however late it arrives;
+  before this, each run searched the last minute of event time, and
+  anything indexed after its run (Security up to ~50s late, Zeek conn p90
+  ~1 min) was never evaluated. Each result row is its own alert, throttled
+  for 5m on the `throttle` fields.
 verification:
   date: '2026-09-29'
   reworked_2026_09_29: >-
@@ -167,8 +176,4 @@ embed:
 references:
   - 'detections/backlog.md, "NTLM relay & coercion" (backlog row: "Coercion trigger")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

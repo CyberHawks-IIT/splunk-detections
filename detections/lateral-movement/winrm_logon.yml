@@ -1,6 +1,6 @@
 name: 'Lateral Movement: WinRM'
 id: lateral-movement-winrm
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: lateral-movement
@@ -18,15 +18,13 @@ data_source:
     session, with the target account and client IP embedded in the message
     text)
 search: |-
-  index=windows LogName="Microsoft-Windows-WinRM/Operational" EventCode=91
-  | rex field=_raw "\\\\(?<user>\S+) clientIP: (?<Source_Network_Address>[\d\.]+)\)"
+  index=windows LogName="Microsoft-Windows-WinRM/Operational" EventCode=91 `detection_window`
+  | rex field=_raw "\\\\(?<user>\S+) clientIP: (?<attacker_ip>[\d\.]+)\)"
   | rex field=ComputerName "(?<host>[^.]+)"
-  | where Source_Network_Address!="10.0.2.1"
-  | bucket _time span=1m
-  | stats count by _time Source_Network_Address host user
-  | rename Source_Network_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | where attacker_ip!="10.0.2.1"
+  | stats count by attacker_ip host user
+  | `normalize_host(host)`
+  | `normalize_user(user)`
   | table attacker_ip host user
 how_to_implement: >-
   No infra fix needed -- the WinRM Operational channel was already
@@ -45,6 +43,15 @@ known_false_positives: >-
   No other legitimate WinRM usage exists in this range day-to-day (no
   configuration-management tooling polls over WinRM here) -- revisit if
   that changes.
+throttle: [attacker_ip, host, user]
+changes_2026_09_30: >-
+  One row per attacker, host and user (the minute bucket is gone). Runs
+  every minute over the events indexed in the previous minute
+  (`detection_window`), so an event is evaluated however late it arrives;
+  before this, each run searched the last minute of event time, and
+  anything indexed after its run (Security up to ~50s late, Zeek conn p90
+  ~1 min) was never evaluated. Each result row is its own alert, throttled
+  for 5m on the `throttle` fields.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
@@ -66,8 +73,4 @@ embed:
 references:
   - 'detections/backlog.md, "Credential & ticket dumping" (backlog row: "WinRM logon")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

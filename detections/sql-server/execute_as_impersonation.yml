@@ -1,6 +1,6 @@
 name: EXECUTE AS Impersonation
 id: sql-server-execute-as-impersonation
-version: 4
+version: 5
 date: '2026-09-30'
 status: production
 category: sql-server
@@ -16,24 +16,22 @@ data_source:
     SQL Server Audit (`detection_impersonation_audit`), action_id = IMP,
     a literal "EXECUTE AS" statement present
 search: |-
-  index=mssql sourcetype=mssql_audit action_id="IMP*" succeeded=1 statement="EXECUTE AS*" NOT server_principal_name="NT SERVICE*"
+  index=mssql sourcetype=mssql_audit action_id="IMP*" succeeded=1 statement="EXECUTE AS*" NOT server_principal_name="NT SERVICE*" `detection_window`
   | eval event_epoch=strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z")
   | where isnotnull(event_epoch) AND _time - event_epoch <= 600
   | eval host=replace(source, "_mssql_audit", "")
   | rex field=statement "EXECUTE AS LOGIN\s*=\s*.(?<impersonated>[^'\"]+)"
   | rename server_principal_name as user
   | lookup known_range_hosts hostname AS host OUTPUT ip AS host_ip
-  | join type=left host session_id [ search index=mssql sourcetype=mssql_audit action_id=LGIS earliest=-7d latest=now | eval host=replace(source, "_mssql_audit", ""), login=tostring(floor(strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z"))) . "|" . client_address | stats values(login) as logins by host session_id | eval logins=mvjoin(logins, ";") ]
+  | join type=left host session_id [ search index=mssql sourcetype=mssql_audit action_id=LGIS earliest=-7d latest=+5m | eval host=replace(source, "_mssql_audit", ""), login=tostring(floor(strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z"))) . "|" . client_address | stats values(login) as logins by host session_id | eval logins=mvjoin(logins, ";") ]
   | eval logins=split(logins, ";")
   | eval prior_logins=mvmap(logins, if(tonumber(mvindex(split(logins, "|"), 0)) <= event_epoch + 1, logins, null()))
-  | eval Source_Network_Address=mvindex(split(mvindex(mvsort(prior_logins), -1), "|"), 1)
-  | eval Source_Network_Address=if(Source_Network_Address="local machine", host_ip, Source_Network_Address)
-  | bucket _time span=1m
-  | stats values(impersonated) as impersonated values(Source_Network_Address) as Source_Network_Address by _time host user
-  | rename Source_Network_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
-  | eval impersonated=if(isnull(impersonated), null(), mvmap(impersonated, replace(replace(impersonated, "^.*\\\\", ""), "@.*$", "")))
+  | eval attacker_ip=mvindex(split(mvindex(mvsort(prior_logins), -1), "|"), 1)
+  | eval attacker_ip=if(attacker_ip="local machine", host_ip, attacker_ip)
+  | stats values(attacker_ip) as attacker_ip values(impersonated) as impersonated by host session_id user
+  | `normalize_host(host)`
+  | `normalize_user(user)`
+  | `normalize_user(impersonated)`
   | table attacker_ip host user impersonated
 how_to_implement: >-
   Requires defense-tooling's DB Connect setup already forwarding
@@ -92,6 +90,17 @@ known_false_positives: >-
   one ;-joined string: `join` flattens a multivalue field into a single
   newline-joined value, which made the first live test pick the wrong
   login.)
+throttle: [attacker_ip, host, user]
+changes_2026_09_30: >-
+  Grouped by SQL session (host + session_id, the same key the attacker IP
+  is traced from) instead of host+user+minute, so two attackers using one
+  SQL login are separate alerts, and a session whose login can't be traced
+  still alerts (attacker_ip blank) instead of being dropped. Runs every minute over the events indexed in the
+  previous minute (`detection_window`), so an event is evaluated however
+  late it arrives; before this, each run searched the last minute of event
+  time, and anything indexed after its run (Security up to ~50s late, Zeek
+  conn p90 ~1 min) was never evaluated. Each result row is its own alert,
+  throttled for 5m on the `throttle` fields.
 verification:
   reverification_2026_09_30_session: >-
     Session-based attacker IP, two concurrent attackers on sql1, both as
@@ -152,8 +161,4 @@ embed:
 references:
   - 'detections/backlog.md, "SQL Server" (backlog row: "EXECUTE AS impersonation")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

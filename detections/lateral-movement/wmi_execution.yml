@@ -1,6 +1,6 @@
 name: 'Lateral Movement: WMI'
 id: lateral-movement-wmi
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: lateral-movement
@@ -15,15 +15,14 @@ data_source:
     Sysmon Event 1 (ProcessCreate, `ParentImage` = `WmiPrvSE.exe`) + Windows
     Events 4624 (Logon Type 3) on the same target for source-IP attribution
 search: |-
-  index=windows sourcetype=XmlWinEventLog EventID=1 ParentImage="*WmiPrvSE.exe"
+  index=windows sourcetype=XmlWinEventLog EventID=1 ParentImage="*WmiPrvSE.exe" `detection_window`
   | eval host_key=lower(host), session_id=lower(LogonId)
-  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Source_Network_Address) as Source_Network_Address by host_key session_id ]
-  | where isnotnull(Source_Network_Address) AND Source_Network_Address!="10.0.2.1"
-  | bucket _time span=1m
-  | stats values(User) as user by _time Source_Network_Address host_key
-  | rename Source_Network_Address as attacker_ip, host_key as host
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
-  | eval user=if(isnull(user), null(), mvmap(user, replace(replace(user, "^.*\\\\", ""), "@.*$", "")))
+  | `logon_source`
+  | where isnotnull(logon_src) AND attacker_ip!="10.0.2.1"
+  | stats values(User) as user by attacker_ip host_key
+  | rename host_key as host
+  | `normalize_host(host)`
+  | `normalize_user(user)`
   | table attacker_ip host user
 how_to_implement: >-
   No infra fix needed -- Sysmon's process-creation logging and the
@@ -61,6 +60,15 @@ known_false_positives: >-
   opened that session (host + Logon ID), the same session trace the other
   detections use. Processes whose session has no network source (e.g.
   SYSTEM children of WmiPrvSE) are not lateral movement and drop out.
+throttle: [attacker_ip, host]
+changes_2026_09_30: >-
+  One row per attacker and host (the minute bucket is gone). Runs every
+  minute over the events indexed in the previous minute
+  (`detection_window`), so an event is evaluated however late it arrives;
+  before this, each run searched the last minute of event time, and
+  anything indexed after its run (Security up to ~50s late, Zeek conn p90
+  ~1 min) was never evaluated. Each result row is its own alert, throttled
+  for 5m on the `throttle` fields.
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
@@ -82,8 +90,4 @@ embed:
 references:
   - 'detections/backlog.md, "Lateral movement" (backlog row: "WMI remote execution")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false

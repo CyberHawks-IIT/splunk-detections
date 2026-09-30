@@ -292,6 +292,73 @@ confirmed live from john-kali:
   When `impersonated` can't be recovered (Zeek miss), the Self is not
   suppressed rather than dropped on an unverifiable match.
 
+## Per-attempt alerting, index-time windows, shared macros (2026-09-30)
+
+A pass over all 49 detections for two questions the user asked: can each be
+simplified without losing accuracy, and does each fire *separately per
+attacker* when several run the same technique in a short window. Three
+mechanisms came out of it; they are now the standard shape for every
+detection and for anything added later.
+
+- **Every detection runs every minute over the events *indexed* in the
+  previous minute, not the last minute of event time.** The base search
+  carries the `` `detection_window` `` macro (`_index_earliest=-2m@m
+  _index_latest=-1m@m`). A scheduled run's `now()` is its scheduled minute,
+  so consecutive runs tile index time with no gap or overlap: every event is
+  evaluated exactly once, however late it lands. This fixes a real,
+  silent miss — the old searches used a `-1m..now` *event-time* window, but
+  Zeek `conn` is written ~1 min after a flow ends (p90 ~1 min index lag) and
+  Security events land up to ~50 s late, so a scan or logon whose events
+  were indexed after its run's window closed was never evaluated by any run.
+  The dispatch window (`dispatch.earliest_time=-4h`, `latest=+5m`, both from
+  `build_app.py`'s `DEFAULT_SCHEDULE`) is only an outer bound on how late an
+  event may arrive and still be seen; `+5m` also tolerates a host clock
+  running a little fast. `build_app.py` supplies the schedule, so a YAML
+  normally has **no `schedule:` block** — add one only to override (e.g.
+  Certificate Request (HTTP) uses a window one minute further back for IIS
+  delivery lag).
+- **One alert per attempt, keyed on identity, via per-result throttling.**
+  Each saved search sets `alert.digest_mode = 0` (Splunk fires the action
+  once per result row) and `alert.suppress = 1` on the YAML's **`throttle`**
+  field list for `alert.suppress.period` (default 5m). The throttle key is
+  the columns that identify one attempt — the attacker plus the target/object
+  (`attacker_ip` + e.g. `task`, `service`, `id`, `target`, `command`, or just
+  `attacker_ip` for a burst technique like a scan or spray). So two attackers,
+  or one attacker against two objects, are distinct rows and distinct alerts;
+  the throttle only stops the *same* attempt re-alerting as its later events
+  trickle in or its burst is re-evaluated. `throttle` is a required YAML
+  field (`build_app.py` enforces it). The Discord action honours this: with
+  `action.discord_alert.param.per_result = 1` it posts only the row the
+  invocation is for (see defense-tooling `discord_alert.py`), so each fired
+  attempt is its own embed and the per-search throttle governs repeats.
+  **Firing separately per attacker is structural** — every `| stats` groups
+  `by attacker_ip` (+ object) and every `| table` leads with it — not a
+  timing accident; verified live with two concurrent attackers and a
+  3-row probe (3 IPs → 3 independently-throttled embeds).
+- **Threshold/pair detections search a wider event-time span and gate on a
+  freshly-indexed event.** A detection that must see an attempt's
+  *neighbouring* events to judge it — a burst threshold (scan, spray,
+  Kerberoast), a query/reply pair (Name Resolution Poisoning), or a
+  two-log pair indexed apart (Service Creation's 4697 in Security + 7045 in
+  System) — can't use the 1-minute `` `detection_window` `` alone. These use
+  `earliest=-30m latest=+5m` (or `-30m` on the pieces) and the
+  `` `in_detection_window(t)` `` macro to fire only when a matching group
+  includes an event indexed in *this* run's minute, so each burst is judged
+  whole, once, when a new event of it arrives — and boundary-straddling
+  bursts that fixed `bucket`s used to split (and drop under threshold) no
+  longer are. Recon burst counts moved from `bucket` to `streamstats
+  time_window=...` (a true sliding window) for the same reason.
+- **Shared macros replace the copy-pasted blocks** (`app/default/macros.conf`,
+  hand-maintained like `build_app.py`, not generated): `` `detection_window` ``,
+  `` `in_detection_window(t)` ``, `` `subject_session` `` (host_key +
+  session_id off a Windows Security event), `` `logon_source` `` (the
+  4624 `Logon_ID`→`Source_Network_Address` trace + host-IP fallback that ~20
+  Windows detections shared verbatim), and `` `normalize_host(field)` `` /
+  `` `normalize_user(field)` `` (the standard output-normalization `eval
+  mvmap` pairs). Use them instead of re-pasting; they are the accuracy-neutral
+  half of the "simplify" answer. The macros are in the app's `default/`, so
+  they resolve for the app's own searches with no metadata export.
+
 ## Status
 
 Implementation phase started 2026-09-27 (step 5 of the monitoring rollout

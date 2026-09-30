@@ -1,6 +1,6 @@
 name: SMB Anonymous Object Enumeration
 id: weak-auth-smb-anonymous-object-enumeration
-version: 3
+version: 4
 date: '2026-09-30'
 status: production
 category: weak-auth
@@ -18,21 +18,18 @@ data_source:
     (SamrEnumerateUsersInDomain, SamrEnumerateGroupsInDomain,
     SamrEnumerateAliasesInDomain)
 search: |-
-  index=zeek sourcetype=zeek:dce_rpc endpoint=samr (operation=SamrEnumerateUsersInDomain OR operation=SamrEnumerateGroupsInDomain OR operation=SamrEnumerateAliasesInDomain)
+  index=zeek sourcetype=zeek:dce_rpc endpoint=samr (operation=SamrEnumerateUsersInDomain OR operation=SamrEnumerateGroupsInDomain OR operation=SamrEnumerateAliasesInDomain) `detection_window`
   | lookup known_range_hosts ip AS id_resp_h OUTPUT hostname
-  | eval src=id_orig_h, host=lower(coalesce(hostname, id_resp_h)), method="samr", objects=case(operation="SamrEnumerateUsersInDomain","users", operation="SamrEnumerateGroupsInDomain","groups", operation="SamrEnumerateAliasesInDomain","groups", 1=1, operation)
+  | eval attacker_ip=id_orig_h, host=lower(coalesce(hostname, id_resp_h)), method="samr", objects=case(operation="SamrEnumerateUsersInDomain","users", operation="SamrEnumerateGroupsInDomain","groups", operation="SamrEnumerateAliasesInDomain","groups", 1=1, operation)
   | append [
-      search index=windows EventCode=5145 Share_Name="*IPC$*" (Relative_Target_Name=samr OR Relative_Target_Name=lsarpc)
+      search index=windows EventCode=5145 Share_Name="*IPC$*" (Relative_Target_Name=samr OR Relative_Target_Name=lsarpc) `detection_window`
       | rex field=_raw "Account Name:\t*(?<acct>[^\r\n]+)"
       | where like(acct,"ANONYMOUS LOGON")
       | rex field=ComputerName "(?<host>[^.]+)"
-      | eval src=Source_Address, host=lower(host), method=Relative_Target_Name, objects=if(Relative_Target_Name="samr","users or groups","SID lookup")
+      | eval attacker_ip=Source_Address, host=lower(host), method=Relative_Target_Name, objects=if(Relative_Target_Name="samr","users or groups","SID lookup")
     ]
-  | bucket _time span=1m
-  | stats values(objects) as objects values(method) as method by _time src host
-  | rename src as Source_Network_Address
-  | rename Source_Network_Address as attacker_ip
-  | eval host=if(isnull(host), null(), mvmap(host, if(match(host, "^[0-9.]+$") OR like(host, "%:%"), host, lower(replace(host, "\..*$", "")))))
+  | stats values(objects) as objects values(method) as method by attacker_ip host
+  | `normalize_host(host)`
   | table attacker_ip host method objects
 how_to_implement: >-
   Requires defense-tooling's Zeek sensor forwarding dce_rpc.log (already
@@ -56,6 +53,15 @@ known_false_positives: >-
   planner mentioned) wasn't included for the same reason plus this domain
   having no trusts to enumerate in the first place -- nothing to verify
   against.
+throttle: [attacker_ip, host]
+changes_2026_09_30: >-
+  One row per source and host (the minute bucket is gone). Runs every
+  minute over the events indexed in the previous minute
+  (`detection_window`), so an event is evaluated however late it arrives;
+  before this, each run searched the last minute of event time, and
+  anything indexed after its run (Security up to ~50s late, Zeek conn p90
+  ~1 min) was never evaluated. Each result row is its own alert, throttled
+  for 5m on the `throttle` fields.
 verification:
   date: '2026-09-27'
   reverification_2026_09_29: >-
@@ -86,8 +92,4 @@ embed:
 references:
   - 'detections/backlog.md, "Weak / missing authentication" (backlog row: "Anonymous logon / null session")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
-schedule:
-  cron: '* * * * *'
-  earliest: '-1m'
-  latest: now
 disabled: false
