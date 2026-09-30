@@ -124,7 +124,11 @@ scoped to source IP + the planner's fields) came out of this same pass.
   is exactly `attacker_ip` + the planner's additional fields, in the same
   order as `embed.additional_fields`. (The one exception is Pass-the-Ticket,
   whose ticket-reuse semantics report `origin`/`destination` rather than a
-  single attacker IP.)
+  single attacker IP; its `embed.attacker_field: destination` tells the
+  Discord action which column to resolve to an attacker name.) The Discord
+  embed description is "Full Name (attacker_ip)", resolved on the indexer
+  from defense-tooling's Proxmox-derived attacker directory (see its
+  `docs/discord-alerting.md`), so `attacker_ip` must be a raw source IP.
 - **Zeek fields in SPL use underscores, not the dotted Zeek/CIM
   convention.** `id.orig_h`, `id.resp_h`, `id.resp_p`, etc. as written in
   this file's prose (and in Zeek's own docs) are `id_orig_h`, `id_resp_h`,

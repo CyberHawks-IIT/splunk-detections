@@ -84,15 +84,20 @@ def render_stanza(d, discord=False):
     )
     if discord:
         # The stanza name is the embed title (this repo's convention: the
-        # Splunk alert name IS the Discord embed title). The action renders the
-        # result row's columns as embed fields; each search's `| table` is
-        # already exactly attacker_ip + the planner's additional_fields, so we
-        # pass that field list to fix ordering and skip any stray columns.
+        # Splunk alert name IS the Discord embed title). The action resolves
+        # the attacker IP column to "Name (IP)" for the embed description and
+        # renders the planner's additional_fields as embed fields; each
+        # search's `| table` is already exactly attacker_ip + those fields, so
+        # we pass that field list to fix ordering and skip any stray columns.
+        # A search with no attacker_ip column names its own via
+        # embed.attacker_field (the action defaults to attacker_ip).
         embed = d.get("embed", {})
         fields = embed.get("additional_fields", []) or []
         stanza += "action.discord_alert = 1\n"
         if fields:
             stanza += f"action.discord_alert.param.fields = {','.join(fields)}\n"
+        if embed.get("attacker_field"):
+            stanza += f"action.discord_alert.param.attacker_field = {embed['attacker_field']}\n"
     return stanza
 
 

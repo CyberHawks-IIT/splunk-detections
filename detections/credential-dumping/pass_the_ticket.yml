@@ -88,6 +88,9 @@ verification:
     secondary IP/route from john-kali afterward.
 embed:
   title: Pass-the-Ticket
+  # No attacker_ip column (ticket-reuse semantics): the attacker is the host
+  # reusing the ticket, so the Discord description resolves `destination`.
+  attacker_field: destination
   additional_fields:
     - origin
     - destination
