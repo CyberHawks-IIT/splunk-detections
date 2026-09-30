@@ -1,139 +1,151 @@
 name: LDAP Query
 id: enumeration-ldap-query
-version: 6
+version: 7
 date: '2026-09-30'
 status: production
 category: enumeration
 description: >-
-  An LDAP, LDAPS, or ADWS (Active Directory Web Services) session against a
-  domain controller from an IP not in this range's known static-IP inventory
-  (i.e. not one of the range's own domain-joined hosts) -- the network-visible
-  half of any directory enumeration tool (ldapsearch, BloodHound's SharpHound,
-  netexec's `--users`/`--groups`, the ActiveDirectory PowerShell module,
-  SOAPHound, etc). Every protocol is enriched with the actual search filter
-  and bind account from the DC's own 1644 "Field Engineering" log, which
-  logs every directory search (thresholds at 1 -- see how_to_implement).
-  Plain LDAP and LDAPS are joined exactly, by client IP + TCP source port
-  (1644 is logged by the DC's LDAP engine after TLS is terminated, so LDAPS
-  carries full content too). ADWS is joined by time: ADWS runs each search
-  on the DC over loopback, so its 1644 shows client `[::1]` with the real
-  remote user, and is matched to the Zeek 9389 session to the same DC whose
-  lifetime contains it.
+  An LDAP, LDAPS, or ADWS (Active Directory Web Services) directory search
+  against a domain controller from an IP not in this range's known static-IP
+  inventory (i.e. not one of the range's own domain-joined hosts) -- the
+  network-visible half of any directory enumeration tool (ldapsearch,
+  BloodHound's SharpHound, netexec's `--users`/`--groups`, the ActiveDirectory
+  PowerShell module, SOAPHound, etc). It anchors on the DC's own 1644 "Field
+  Engineering" event, which logs every directory search with the bind account
+  and the exact filter, so LDAP, LDAPS and ADWS all report the user and query.
+  For LDAP and LDAPS the 1644 also carries the real client IP, so those fire on
+  each query with no dependence on Zeek. ADWS runs the search on the DC over
+  loopback, so its 1644 shows client `[::1]`; its real client IP and the
+  ldap-vs-ldaps distinction come from Zeek's immediate connection-open log
+  (`zeek:conn_open`), written when the TCP session is established rather than
+  when it closes.
 data_source:
   - >-
-    Zeek `conn.log` (TCP/389 LDAP, TCP/636 LDAPS, TCP/9389 ADWS) for the
-    attacker IP, correlated to Windows Event 1644 (Field Engineering,
-    Directory Service log, dc1/dc2) for the query content and bind account:
-    by client IP + source port for LDAP/LDAPS, by DC + connection time window
-    (Zeek `ts` .. `ts`+`duration`, +/-2s) for ADWS's loopback 1644s
+    Windows Event 1644 (Field Engineering, Directory Service log, dc1/dc2) for
+    the bind account, filter and -- for LDAP/LDAPS -- the client IP, correlated
+    to Zeek `conn_open.log` (`zeek:conn_open`, the connection-open log for
+    TCP/389, TCP/636 and TCP/9389): by client IP + source port to label
+    ldap vs ldaps, and by DC + connection time for the ADWS (9389) client IP
+    that 1644 does not carry
 search: |-
-  index=zeek sourcetype=zeek:conn (id_resp_p=389 OR id_resp_p=636 OR id_resp_p=9389) `detection_window`
-  | where match(history, "D") OR match(history, "^[Cc]+$")
-  | lookup known_range_hosts ip AS id_orig_h OUTPUT hostname
-  | where isnull(hostname)
-  | eval protocol=case(id_resp_p=389, "ldap", id_resp_p=636, "ldaps", id_resp_p=9389, "adws")
-  | rename id_orig_h as attacker_ip, id_resp_h as host, id_orig_p as client_port
-  | lookup known_range_hosts ip AS host OUTPUT hostname AS dc
-  | eval conn_start=tonumber(ts), conn_end=conn_start+coalesce(tonumber(duration), 0), adws_dc=if(protocol="adws", dc, null())
-  | join type=left attacker_ip client_port [
-      search index=windows source="WinEventLog:Directory Service" EventCode=1644
-      | rex field=_raw "Client:\r?\n(?<attacker_ip>[0-9.]+):(?<client_port>\d+)"
-      | where isnotnull(client_port)
-      | rex field=_raw "Filter:\r?\n\s*(?<query>.+?)\s*\r?\n"
-      | rex field=_raw "User:\r?\n(?<user>\S+)"
-      | stats values(user) as user values(query) as query by attacker_ip client_port
-    ]
-  | join type=left max=0 adws_dc [
-      search index=windows source="WinEventLog:Directory Service" EventCode=1644
-      | rex field=_raw "Client:\r?\n\[?(?<client_ip>[^\]\s]+?)\]?:\d+\s"
-      | where client_ip="::1" OR client_ip="127.0.0.1"
-      | rex field=_raw "User:\r?\n(?<adws_user>\S+)"
-      | where NOT like(adws_user, "%$") AND adws_user!="UNAVAILABLE"
-      | rex field=_raw "Filter:\r?\n\s*(?<adws_query>.+?)\s*\r?\n"
-      | eval adws_dc=lower(host), q_time=_time
-      | table adws_dc q_time adws_user adws_query
-    ]
-  | eval in_window=if(q_time>=conn_start-2 AND q_time<=conn_end+2, 1, 0)
-  | eval user=if(protocol="adws", if(in_window=1, adws_user, null()), user), query=if(protocol="adws", if(in_window=1, adws_query, null()), query)
+  index=windows source="WinEventLog:Directory Service" EventCode=1644 `detection_window`
+  | rex field=_raw "Client:\r?\n\s*(?<client_raw>[^\r\n]+)"
+  | rex field=_raw "Filter:\r?\n\s*(?<query>.+?)\s*\r?\n"
+  | rex field=_raw "User:\r?\n\s*(?<user>\S+)"
+  | eval client_raw=trim(client_raw)
+  | rex field=client_raw "^\[?(?<client_ip>[^\]\s]+?)\]?:(?<client_port>\d+)$"
+  | eval is_adws=if(client_ip="::1" OR client_ip="127.0.0.1", 1, 0)
+  | eval host=lower(replace(host, "\..*$", ""))
+  | where (is_adws=1 AND NOT like(user, "%$") AND user!="UNAVAILABLE") OR is_adws=0
+  | lookup known_range_hosts ip AS client_ip OUTPUT hostname AS client_is_range
+  | where is_adws=1 OR isnull(client_is_range)
+  | eval cp_key=if(is_adws=0, client_ip.":".client_port, "na")
+  | join type=left cp_key [
+      search index=zeek sourcetype=zeek:conn_open (id_resp_p=389 OR id_resp_p=636) earliest=-30m
+      | eval cp_key=id_orig_h.":".id_orig_p
+      | stats latest(id_resp_p) as dport by cp_key ]
+  | join type=left max=0 host [
+      search index=zeek sourcetype=zeek:conn_open id_resp_p=9389 earliest=-30m
+      | lookup known_range_hosts ip AS id_orig_h OUTPUT hostname AS orig_is_range
+      | where isnull(orig_is_range)
+      | lookup known_range_hosts ip AS id_resp_h OUTPUT hostname AS host
+      | eval host=lower(host), pair=ts."|".id_orig_h
+      | stats list(pair) as pairs by host ]
+  | eval pairs=if(is_adws=1, split(mvjoin(pairs, " "), " "), null())
+  | eval cand=mvmap(pairs, if(tonumber(mvindex(split(pairs, "|"), 0)) <= _time+2, pairs, null()))
+  | eval adws_ip=mvindex(split(mvindex(mvsort(cand), -1), "|"), 1)
+  | eval attacker_ip=if(is_adws=1, adws_ip, client_ip)
+  | eval protocol=case(is_adws=1, "adws", dport=389, "ldap", dport=636, "ldaps", true(), "ldap")
+  | where isnotnull(attacker_ip)
   | stats values(user) as user values(query) as query by attacker_ip host protocol
-  | lookup known_range_hosts ip AS host OUTPUT hostname AS host_name | eval host=coalesce(host_name, host)
   | `normalize_host(host)`
   | `normalize_user(user)`
   | table attacker_ip host protocol user query
 how_to_implement: >-
-  **1644 must log every search, and the thresholds must be 1, not 0.**
+  **1644 must log every search, with the thresholds at 1, not 0.**
   cyber-range's `configure_1644.ps1` sets Field Engineering (NTDS\Diagnostics
-  "15 Field Engineering") to 5 and "Search Time Threshold (msecs)",
-  "Expensive Search Results Threshold", and "Inefficient Search Results
-  Threshold" (NTDS\Parameters) all to 1. Until 2026-09-29 it set them to 0,
-  which Microsoft documents as "use the default" (30000 ms / 10000 visited /
-  1000 visited) -- so only slow or unindexed searches logged, and indexed
-  recon like `(sAMAccountName=administrator)` or `(servicePrincipalName=*)`
-  (Kerberoast SPN enumeration) produced no 1644 at all over any protocol.
-  At 1, a single-object indexed lookup (1 entry visited) logs. The
-  thresholds are read live (no NTDS restart). The anonymous RootDSE read
-  never logs (not a directory search), and AD rejects anonymous subtree
-  searches before they execute, so neither produces a 1644. **Earlier
-  versions of this file said LDAPS and ADWS produce no 1644 -- both wrong,
-  corrected 2026-09-29:** LDAPS logs identically to plain LDAP (real client
-  IP:port, user, filter -- the earlier LDAPS test simply used a filter that
-  fell under the default thresholds), and ADWS logs with client `[::1]`
-  and the real remote user (e.g. `CYBERHAWKS\dsmith`). ADWS attribution
-  can't use the DC's 4624 either (the ADWS network logon records Source
-  Network Address `-`), hence the Zeek 9389 time join; the approach mirrors
-  Huntress's published ADWS attribution work (1644 `[::1]` correlated to the
-  9389 connection by time). The join uses Zeek's `ts` field, not `_time`:
-  this range's Zeek `_time` is set near index time (minute-rounded), up to
-  ~a minute after the real connection start, which is also why both 1644
-  subsearches look back `-5m` rather than inheriting the `-1m` schedule
-  window. **Volume:** with every search logging, the DCs' own background
-  searches were ~52 MB/day of 1644 -- dropped at the forwarder by
-  defense-tooling's dc1/dc2 Directory Service blacklist (DC machine accounts
-  DC1$/DC2$ and user UNAVAILABLE internal DS operations only; any other
-  `$` account, e.g. an attacker-created machine account, is still
-  forwarded). The rest of this detection's history: Zeek's `ldap.log` field
-  extraction was added to `dt_detection_content` (2026-09-27), and NTDS on
-  dc1 was restarted then on the belief that the 0 thresholds needed it --
-  that restart was not the real fix (see above).
+  "15 Field Engineering") to 5 and the three NTDS\Parameters search thresholds
+  ("Search Time Threshold (msecs)", "Expensive Search Results Threshold",
+  "Inefficient Search Results Threshold") all to 1. At 0 (Microsoft's "use the
+  default" = 30000 ms / 10000 visited / 1000 visited) only slow or unindexed
+  searches log, so indexed recon like `(sAMAccountName=administrator)` produces
+  no 1644 over any protocol; at 1 a single-object indexed lookup logs. Read
+  live, no NTDS restart. LDAP, LDAPS and ADWS all produce a 1644: LDAP/LDAPS
+  with the real client IP:port (LDAPS is logged after the DC terminates TLS),
+  ADWS with client `[::1]` and the real remote user because ADWS runs the
+  search on the DC over loopback.
+  **Attribution changed 2026-09-30 (latency pass): anchor on 1644, enrich from
+  Zeek's connection-open log.** The detection used to anchor on the Zeek
+  `conn.log` flow (`id_orig_h` as the attacker IP), which is only written when
+  the connection closes -- so it was slow, and it could fire on a bare TLS
+  connection that never completed a search, producing an embed with no user or
+  query. It now anchors on the 1644 itself (logged ~1s after each search), so
+  it fires per query and always has the user and filter. LDAP/LDAPS take the
+  client IP straight from the 1644. ADWS's real IP and the ldap-vs-ldaps label
+  (the 1644 does not record which port the client used) come from
+  `zeek:conn_open`, a lightweight log the Zeek sensor writes on
+  `connection_established` for ports 389/636/9389 (see defense-tooling's
+  `zeek_sensor` role `cyberhawks.zeek` and the `dt_detection_content`
+  `zeek:conn_open` field extraction). Because that log is written when the TCP
+  session opens -- before the first query -- it is always already indexed by
+  the time a 1644 arrives, so both joins resolve immediately (no waiting for
+  the connection to close, which for a pooled ADWS session could be minutes).
+  The ADWS join is by DC + time (most recent external 9389 open at/before the
+  1644); if Zeek did not see the 9389 connection (e.g. an on-subnet client
+  whose mirrored traffic Zeek can't reassemble) the ADWS row has no IP and is
+  dropped rather than alerting without attribution. **Volume:** 1644 is
+  ~52 MB/day at these thresholds, nearly all the DCs' own searches, dropped at
+  the forwarder (dc1/dc2 Directory Service blacklist: DC machine accounts
+  DC1$/DC2$ and user UNAVAILABLE only; any other `$` account is still
+  forwarded). `conn_open` is a few hundred lines a day (all directory-service
+  ports), negligible.
 known_false_positives: >-
   `known_range_hosts` excludes every domain-joined host's static IP, so
   ordinary intra-domain LDAP/ADWS traffic (group policy refresh, member
   servers querying the DC, RSAT from the workstation) never reaches this
-  search. ADWS query attribution is by time, not an exact key: if an
-  in-range admin's ADWS session overlaps an outside ADWS session to the
-  same DC, the admin's queries would be listed on the outside alert too
-  (the alert itself still only fires for the outside IP). Revisit if a
-  legitimate non-domain-joined LDAP/ADWS client (a vulnerability scanner, a
-  monitoring agent) is ever added to this range.
-
-  2026-09-30: an ordinary TCP port scan (nmap -p 1-1000 from john-kali
-  against workstation, not even a DC) fired this for ldap and ldaps with no
-  user or query: any SYN from a non-range host to 389/636 matched. Now the
-  client must have actually sent data (Zeek history contains an uppercase
-  "D"), which every LDAP bind/search does and a scan probe never does.
-  Checksum-only flows (history all "C"/"c", typical of same-vnet mirrored
-  taps where Zeek can't parse flags) are kept so an attacker on the ad vnet
-  is not missed.
+  search: for LDAP/LDAPS the 1644's client IP is checked against it directly,
+  and for ADWS the 9389 connection's origin is. ADWS query attribution is by
+  time, not an exact key: if an in-range admin's ADWS session overlapped an
+  outside session to the same DC the outside alert could list the admin's
+  queries too (it still only fires for the outside IP). Because the anchor is
+  the 1644, a bare port scan or an incomplete TLS handshake to 389/636 -- which
+  runs no directory search -- produces no 1644 and cannot fire this (the old
+  Zeek-anchored version needed a "history contains D" guard for exactly that;
+  no longer relevant). Revisit if a legitimate non-domain-joined LDAP/ADWS
+  client (a vulnerability scanner, a monitoring agent) is ever added.
 throttle: [attacker_ip, host, protocol]
 changes_2026_09_30: >-
-  Grouped by attacker, DC and protocol (the minute bucket is gone). The
-  1644 joins now cover the whole lookback instead of the last 5 minutes:
-  Zeek writes a connection when it closes, so a session held open longer
-  than 5 minutes used to lose its query text. Runs every minute over the
-  events indexed in the previous minute (`detection_window`), so an event
-  is evaluated however late it arrives; before this, each run searched the
-  last minute of event time, and anything indexed after its run (Security
-  up to ~50s late, Zeek conn p90 ~1 min) was never evaluated. Each result
-  row is its own alert, throttled for 5m on the `throttle` fields.
+  Re-anchored from the Zeek `conn.log` flow onto the DC's 1644 event, as part
+  of the latency pass. LDAP and LDAPS now fire per query with no Zeek
+  dependency (client IP, user and filter all come from the 1644); LDAPS in
+  particular now always shows the user and query, which the old flow-anchored
+  version dropped when a TLS connection completed no search. ADWS fires per
+  query too, taking its client IP and the ldap/ldaps label from the new
+  `zeek:conn_open` connection-open log (written on session establishment, so it
+  is available immediately rather than at connection close). The old
+  history-"D" scan guard and the `conn.log` join are gone. Grouped by attacker,
+  DC and protocol; each result row is its own alert, throttled for 5m on the
+  `throttle` fields. (Implementation note: the ADWS join carries the candidate
+  9389 opens as a single multivalue `pair` = `ts|ip` field and re-splits it
+  with `split(mvjoin(...))` after the join, because `join` flattens a
+  multivalue field into one space-joined value -- a plain `mvzip` of two such
+  fields mis-pairs them.)
 verification:
+  reverification_2026_09_30_latency: >-
+    Rebuilt to anchor on 1644 + zeek:conn_open. Live from john-kali
+    (192.168.1.11): ldapsearch as dsmith over ldap:// and ldaps:// to dc1 with
+    `(sAMAccountName=administrator)` / `(servicePrincipalName=*)` -- both fired
+    with protocol correctly labelled ldap vs ldaps (from conn_open's dest port),
+    user dsmith@cyberhawks.lab and the full filter, ~13-18s after the query.
+    ADWS from john-windows: fired with the real client IP (from the 9389
+    conn_open), protocol adws, the remote user and the filter. conn_open lands
+    in Splunk in ~0.2s. See the pre-latency-pass verification below for the
+    original threshold/LDAPS/ADWS findings.
   reverification_2026_09_30: >-
-    History-filter change, replayed inline over all ~7h of data since boot
-    (with the 1644 subsearch windows widened to match): the old logic
-    returned the nmap scan's SYN probes to workstation 389/636 (no user, no
-    query) plus the real queries; the new logic returns only the real
-    queries. Live from john-kali: ldapsearch as dsmith over ldap:// and
-    ldaps:// to dc1, filter (servicePrincipalName=*), both reported with
-    user dsmith@cyberhawks.lab and the full filter.
+    History-filter change (superseded by the latency re-anchor above), replayed
+    inline over all data since boot: the old logic returned the nmap scan's SYN
+    probes to workstation 389/636 (no user, no query) plus the real queries;
+    the new logic returns only the real queries.
   date: '2026-09-29'
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: john-kali (VM 611, 192.168.1.11) for LDAP/LDAPS; john-windows (VM 610, 192.168.1.10) for ADWS
