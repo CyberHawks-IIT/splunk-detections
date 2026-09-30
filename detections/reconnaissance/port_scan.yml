@@ -21,8 +21,16 @@ search: |-
   | stats values(hosts) as hosts values(protocol) as protocol values(ports) as ports by id_orig_h
   | rename id_orig_h as attacker_ip
   | `normalize_host(hosts)`
-  | eval ports=mvsort(mvmap(ports, printf("%05d", ports)))
-  | eval ports=mvmap(ports, tostring(tonumber(ports)))
+  | mvexpand ports
+  | eval port=tonumber(ports)
+  | sort 0 attacker_ip port
+  | streamstats current=f last(port) as prev by attacker_ip
+  | eval _brk=if(isnull(prev) OR port>prev+1, 1, 0)
+  | streamstats sum(_brk) as _grp by attacker_ip
+  | stats min(port) as lo max(port) as hi values(hosts) as hosts values(protocol) as protocol by attacker_ip _grp
+  | eval rng=if(lo==hi, tostring(lo), tostring(lo)."-".tostring(hi))
+  | sort 0 attacker_ip _grp
+  | stats list(rng) as ports values(hosts) as hosts values(protocol) as protocol by attacker_ip
   | table attacker_ip hosts protocol ports
 how_to_implement: >-
   Requires defense-tooling's Zeek sensor forwarding conn.log, plus this
@@ -72,8 +80,12 @@ changes_2026_09_30: >-
   searched the last minute of event time, and anything indexed after its
   run (Security up to ~50s late, Zeek conn p90 ~1 min) was never
   evaluated. Each result row is its own alert, throttled for 5m on the
-  `throttle` fields. `ports` is sorted numerically (pad to 5 digits,
-  mvsort, strip) since `values()` sorts lexically (1, 10, 100, 2).
+  `throttle` fields. `ports` is collapsed into ascending numeric ranges
+  (`mvexpand` the ports, run-length them with `streamstats`, emit lo or
+  lo-hi) so the embed reads `1-122, 124-300` instead of a lexically-sorted
+  list of every port -- which also keeps the field under Discord's 1024-char
+  cap on a full scan. `list()` caps at 100 ranges (a pathological
+  every-other-port scan could hit that; a normal scan is a handful of runs).
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
