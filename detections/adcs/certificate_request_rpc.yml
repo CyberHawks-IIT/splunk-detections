@@ -1,6 +1,6 @@
 name: Certificate Request (RPC)
 id: adcs-certificate-request-rpc
-version: 2
+version: 3
 date: '2026-09-30'
 status: production
 category: adcs
@@ -19,13 +19,11 @@ search: |-
   index=windows EventCode=4887 DCOMorRPC=RPC
   | where NOT match(Requester, "\$$")
   | rex field=ComputerName "(?<host>[^.]+)"
-  | join type=left host [
-      search index=zeek sourcetype=zeek:conn id_resp_p=445
-      | lookup known_range_hosts ip AS id_resp_h OUTPUT hostname
-      | rename hostname as host
-      | where isnotnull(host)
-      | stats values(id_orig_h) as Source_Network_Address by host
-    ]
+  | eval host_key=lower(host), acct=lower(replace(Requester, "^.*\\\\", "")), req_epoch=_time
+  | join type=left host_key acct [ search index=windows EventCode=4624 Logon_Type=3 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","127.0.0.1","::1") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), acct=lower(mvindex(Account_Name,-1)), logon=tostring(floor(_time)) . "|" . Source_Network_Address | stats values(logon) as logons by host_key acct | eval logons=mvjoin(logons, ";") ]
+  | eval logons=split(logons, ";")
+  | eval prior_logons=mvmap(logons, if(tonumber(mvindex(split(logons, "|"), 0)) <= req_epoch + 1, logons, null()))
+  | eval Source_Network_Address=mvindex(split(mvindex(mvsort(prior_logons), -1), "|"), 1)
   | bucket _time span=1m
   | stats values(Source_Network_Address) as Source_Network_Address values(Requester) as user values(Certificate_Template) as template by _time host Request_ID
   | rename Request_ID as id
@@ -53,6 +51,17 @@ known_false_positives: >-
   empirically tuned against observed noise -- revisit if legitimate
   auto-enrollment traffic ever appears and doesn't match the `$`-suffix
   assumption.
+
+  2026-09-30: attacker IP no longer "every IP that touched the CA on 445".
+  The old join took values() of all Zeek 445 clients of the CA in the
+  window, so any other SMB client (or a second attacker) was reported too.
+  4887 carries no session or client address, so there is no exact link;
+  the closest evidence is the requester's own network logon to the CA
+  (NTLM/Kerberos over the \pipe\cert SMB transport): the search takes
+  that account's latest source-bearing Type 3 4624 on the CA at or before
+  the request. Ambiguous only if the same account requests from two
+  machines at once. (The CA does not log a 5145 for the cert pipe, so that
+  was not an option.)
 verification:
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range

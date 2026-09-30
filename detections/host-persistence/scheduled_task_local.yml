@@ -1,6 +1,6 @@
 name: Scheduled Task Creation (Local)
 id: host-persistence-scheduled-task-local
-version: 4
+version: 5
 date: '2026-09-30'
 status: production
 category: host-persistence
@@ -29,8 +29,11 @@ search: |-
   | rex field=_raw "<Arguments>(?<task_args>[^<]*)</Arguments>"
   | eval defender_scan=if(session_id="0x3e7" AND subject_sid="S-1-5-18" AND Task_Name="\\Microsoft\\Windows\\Windows Defender\\Windows Defender Scheduled Scan" AND task_uri=Task_Name AND task_principal="S-1-5-18" AND task_context="LocalSystem" AND mvcount(task_action)=1 AND task_action="Exec" AND match(task_cmd, "^C:\\\\ProgramData\\\\Microsoft\\\\Windows Defender\\\\Platform\\\\[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\\\\MpCmdRun\.exe$") AND task_args="Scan -ScheduleJob -ScanTrigger 55 -IdleScheduledJob", 1, 0)
   | where defender_scan=0
-  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Logon_Type) as subj_type latest(Source_Network_Address) as exact_src by host_key session_id ]
-  | join type=left host_key acct [ search index=windows EventCode=4624 Logon_Type=3 earliest=-2m Source_Network_Address=* NOT Source_Network_Address IN ("-","10.0.2.1","127.0.0.1","::1","0.0.0.0") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), acct=lower(mvindex(Account_Name,-1)) | stats latest(Source_Network_Address) as fb_src by host_key acct ]
+  | join type=left host_key session_id [ search index=windows EventCode=4624 earliest=-1h | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), session_id=lower(mvindex(Logon_ID,-1)) | stats latest(Logon_Type) as subj_type latest(Source_Network_Address) as exact_src latest(_time) as subj_time by host_key session_id ]
+  | join type=left host_key acct [ search index=windows EventCode=4624 Logon_Type=3 earliest=-1h Source_Network_Address=* NOT Source_Network_Address IN ("-","10.0.2.1","127.0.0.1","::1","0.0.0.0") | rex field=ComputerName "(?<host_key>[^.]+)" | eval host_key=lower(host_key), acct=lower(mvindex(Account_Name,-1)), logon=tostring(floor(_time)) . "|" . Source_Network_Address | stats values(logon) as fb_logons by host_key acct | eval fb_logons=mvjoin(fb_logons, ";") ]
+  | eval fb_logons=split(fb_logons, ";")
+  | eval fb_pair=mvmap(fb_logons, if(abs(tonumber(mvindex(split(fb_logons, "|"), 0)) - floor(subj_time)) <= 2, fb_logons, null()))
+  | eval fb_src=mvindex(split(mvindex(mvsort(fb_pair), -1), "|"), 1)
   | eval exact_src=if(exact_src IN ("-","127.0.0.1","::1","0.0.0.0",""),null(),exact_src)
   | eval src=coalesce(exact_src, fb_src)
   | eval path=case(subj_type!=3,"local", src=="10.0.2.1" OR isnull(src),"admin", true(),"lateral")
@@ -80,6 +83,16 @@ known_false_positives: >-
   residual blind spot is a task byte-identical to Defender's, which runs
   only Defender's real signed scanner. The command match is on the task's
   registered action, not an attacker's command line.
+
+  2026-09-30: fallback tightened. A remote NTLM logon produces two 4624s on
+  the target in the same second: one carries the source IP, the other (the
+  RPC authentication over the named pipe, which is the session that creates
+  the task/service) has none, and Windows does not link them (Linked Logon
+  ID 0x0, no shared GUID/port/workstation; confirmed on a live atexec
+  sample). The fallback used to take the same account's latest
+  source-bearing logon in the previous 2 minutes, which could name another
+  client using that account. It now requires that logon to be within 2
+  seconds of the acting session's own logon on the same host.
 verification:
   date: '2026-09-27'
   reverification_2026_09_30: >-
