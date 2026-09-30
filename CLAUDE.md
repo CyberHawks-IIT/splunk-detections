@@ -187,7 +187,13 @@ produced anything:
    `detection_logging` role now sets this value for future provisioning
    (`configure_audit_policy.ps1`); this session applied it live via a
    reboot on every reachable range host except ca/sql2 (LAPS-managed local
-   admin, not directly accessible this session).
+   admin, not directly accessible that session). **Update 2026-09-30: ca and
+   sql2 now confirmed enabled AND live** — reached via the qemu-guest-agent
+   (`qm guest exec 322/325`), both show `FullPrivilegeAuditing=01` +
+   `Sensitive Privilege Use=Success and Failure`, and a `reg save HKLM\SAM` as
+   SYSTEM produces SeBackupPrivilege 4674s (which are suppressed unless the
+   value is live at boot), so no further reboot is needed. They were
+   reprovisioned with the role's value since the original session.
 3. Even with both of those, `defense-tooling`'s Windows forwarder ships an
    explicit per-channel Event ID whitelist for the Security log that
    simply didn't include 4673/4674 — added them
@@ -270,9 +276,16 @@ confirmed live from john-kali:
   request's `client` field (plus the full SPN in `service`, e.g.
   `cifs/dc1.cyberhawks.lab` vs Windows' bare `DC1$`). So both detections use
   Windows 4769 as the reliable trigger and join Zeek on attacker IP + event
-  second for `impersonated`/full-SPN. Zeek only decodes cleanly for
-  router-crossing traffic (the default john-kali path), so `impersonated` is
-  best-effort — the detection still fires on the 4769 signal when Zeek misses.
+  second for `impersonated`/full-SPN. **`impersonated` is now recovered on
+  every attacker path** (2026-09-30): the earlier "router-crossing only,
+  best-effort" caveat was a symptom of the mirror sensor discarding
+  checksum-offloaded packets before L4 reassembly — same-vnet Kerberos (and
+  DCE-RPC/LDAP) produced no `kerberos.log` at all, only pfSense-re-checksummed
+  router-crossing traffic decoded. Fixed by `redef ignore_checksums = T` on
+  the Zeek sensor (see the "Mirrored capture: ignore_checksums" note below);
+  verified with same-vnet (10.0.2.10) and router-crossing (john-kali) TGS
+  both decoding the `client` field. The detection still falls back to the
+  4769 signal alone if Zeek ever misses a single flow.
 - **S4U2Proxy signal:** 4769 with `Transited Services` populated (blank on
   every ordinary TGS; zero in 24h baseline). `Transited Services` is not
   auto-extracted — `rex` it from `_raw` (the value is on the line *after* the
@@ -439,6 +452,41 @@ stage. The repo/live state is authoritative; this is the "why".
 - **Non-SPL changes, so the snapshot cycle is owed** for 510 (cores/limits/
   dispatcher/db poll), 511 (Zeek timeouts), web and ca (IIS ETW). See the
   infra-fix snapshot workflow.
+
+## Mirrored capture: ignore_checksums (2026-09-30)
+
+Investigating why the S4U `impersonated` field was "best-effort" turned up a
+much larger, silent hole: **the Zeek sensor was emitting no `kerberos.log` at
+all, and only sporadic `dce_rpc.log`/`ldap.log`**, while `conn.log` logged
+every flow normally. Root cause: sensor 511 analyzes packets mirrored from
+every guest tap, and the range's virtio NICs offload checksum computation, so
+mirrored copies carry incomplete/blank checksums. Zeek discards packets with
+invalid checksums *before* L4 reassembly by default — so `conn.log`
+(header-only) is unaffected, but every application-layer analyzer that needs
+reassembled payload (Kerberos, DCE-RPC, LDAP-over-TCP) sees nothing. Only
+router-crossing traffic decoded, because pfSense recomputes checksums as it
+routes — which is exactly why the S4U note read "Zeek only decodes cleanly for
+router-crossing traffic." It was never an S4U-specific limit; it degraded
+every same-vnet application-layer signal.
+
+- **Fix:** `redef ignore_checksums = T;` in the `zeek_sensor` role's
+  `cyberhawks.zeek` (applied live via `zeekctl deploy` and committed to
+  defense-tooling). On a mirror/IDS sensor the checksums are not ours to
+  validate — this is the standard SPAN-capture setting.
+- **Verified:** after the fix, `kerberos.log` decodes on both a same-vnet
+  path (test, 10.0.2.10 → dc1) and the router-crossing path (john-kali), with
+  the `client` principal populated; Splunk `zeek:kerberos` immediately began
+  showing real same-vnet domain Kerberos (web→dc2 for bsmith/rsmith, both DCs)
+  where it had been empty for a week.
+- **Implication for the validation pass:** any detection whose signal is a
+  Zeek application-layer log (S4U `impersonated`, LDAP Query's Zeek 9389/ADWS
+  join, Anonymous Logon's `dce_rpc` `LsarLookupSids`/`SamrEnumerateUsersInDomain`
+  calls, NTLM relay specifics) was decode-starved for same-vnet launches before
+  this and should be re-verified now that it isn't. The "same-vnet
+  double-capture gap" framing in earlier notes was a misdiagnosis — conn.log
+  shows exactly one record per uid (no double-capture); the cause was checksums.
+- **Snapshot owed** for 511 (this joins the Zeek-timeouts change already owed
+  there).
 
 ## Status
 

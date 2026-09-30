@@ -83,9 +83,13 @@ known_false_positives: >-
   Legitimate machine-account self-requests are excluded by the own-IP and
   loopback filters (see how_to_implement). No legitimate protocol-transition
   delegation happens in this range post-provisioning. **Field availability
-  note:** `impersonated` comes from Zeek, which decodes Kerberos cleanly
-  only for router-crossing traffic (the default attacker path); an S4U2Self
-  launched from the DC's own vnet may fire with a blank `impersonated`.
+  note:** `impersonated` comes from Zeek's `kerberos.log`, which now decodes
+  on every attacker path. (Until 2026-09-30 the mirror sensor discarded
+  checksum-offloaded packets, so only router-crossing Kerberos decoded and a
+  same-vnet S4U2Self fired with a blank `impersonated`; fixed by
+  `redef ignore_checksums = T` on the sensor.) A Self whose `impersonated`
+  Zeek still fails to recover is not suppressed against its proxy -- it fires
+  rather than being dropped on an unverifiable match.
 throttle: [attacker_ip, user, service]
 changes_2026_09_30: >-
   Now runs every minute like the rest (was every 5 minutes over 5 minutes

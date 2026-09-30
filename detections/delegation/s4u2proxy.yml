@@ -61,13 +61,14 @@ known_false_positives: >-
   range after provisioning. Baseline check: zero 4769 events with a
   populated `Transited Services` field in 24h before the live test. **Field
   availability note:** the `impersonated` and full-SPN `service` values come
-  from Zeek, which only decodes Kerberos cleanly for traffic that crosses
-  the range router (the default attacker path, john-kali -> DC). For an
-  S4U2Proxy launched from a host on the DC's own vnet, Zeek's protocol
-  decode is unreliable (the documented same-vnet double-capture gap), so
-  `impersonated` may be blank and `service` falls back to the machine
-  account name -- the detection still fires on the Windows 4769 signal
-  either way.
+  from Zeek's `kerberos.log`, which now decodes on every attacker path.
+  (Until 2026-09-30 the mirror sensor discarded checksum-offloaded packets,
+  so only router-crossing Kerberos -- re-checksummed by pfSense -- decoded
+  and same-vnet launches produced a blank `impersonated`; fixed by
+  `redef ignore_checksums = T` on the sensor, verified with same-vnet and
+  router-crossing TGS decode.) If Zeek ever misses a single flow the
+  detection still fires on the Windows 4769 signal, with `service` falling
+  back to the machine-account name.
 throttle: [attacker_ip, user, service]
 changes_2026_09_30: >-
   Now runs every minute like the rest (was every 5 minutes over 5 minutes
