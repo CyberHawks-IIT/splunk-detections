@@ -1,6 +1,6 @@
 name: DPAPI Dump
 id: dpapi-dump
-version: 4
+version: 5
 date: '2026-09-30'
 status: production
 category: credential-dumping
@@ -11,23 +11,57 @@ description: >-
   credential decryption attack (mimikatz dpapi::masterkey/cred, or manual
   file copy for offline decryption elsewhere).
 data_source:
-  - 'Windows Events -- 4663, Object Name under a Protect or Credentials folder'
+  - >-
+    Windows Events -- 4663 ReadData on a DPAPI masterkey file (under
+    Protect\) or credential blob (under Credentials\). The SACL is on the
+    files only, never the folders, so folder enumeration produces nothing.
 search: |-
-  index=windows EventCode=4663 (Object_Name="*\Protect\*" OR Object_Name="*\Protect" OR Object_Name="*\Credentials\*" OR Object_Name="*\Credentials") NOT Process_Name="*lsass.exe" `detection_window`
+  index=windows EventCode=4663 Accesses="*ReadData*" (Object_Name="*Protect*" OR Object_Name="*Credentials*") NOT Process_Name="*lsass.exe" `detection_window`
+  | eval masterkey=if(like(Object_Name, "%\\Protect\\%"), Object_Name, null())
+  | eval credential=if(like(Object_Name, "%\\Credentials\\%"), Object_Name, null())
+  | where isnotnull(masterkey) OR isnotnull(credential)
   | `subject_session`
   | `logon_source`
-  | stats values(Object_Name) as files by attacker_ip ComputerName Account_Name
+  | stats values(masterkey) as masterkeys values(credential) as credentials by attacker_ip ComputerName Account_Name
   | rename ComputerName as host, Account_Name as user
   | `normalize_host(host)`
   | `normalize_user(user)`
-  | table attacker_ip host user files
+  | table attacker_ip host user masterkeys credentials
 how_to_implement: >-
-  Requires the file-system SACL on the Protect and Credentials folders
-  (cyber-range's detection_logging role) and the "File System" audit
-  subcategory (also already set). Worked as originally designed -- no
-  additional fix needed, unlike the SAM/SECURITY export technique.
+  Requires the file-system SACL and the "File System" audit subcategory
+  (both from cyber-range's detection_logging role). **v5 (2026-09-30)
+  changed the SACL from the folders to the files.** The old design audited
+  FullControl Success/Failure on the Protect and Credentials *folders* with
+  inheritance, but DPAPI creates the per-user `<SID>` subfolders with a
+  protected security descriptor, so the inheritable ACE never reached the
+  masterkey files -- reading a masterkey produced no 4663, and the only
+  events were folder listings (ListDirectory), which false-fired on any
+  enumeration of the profile (a host inventory, Windows Search) without a
+  credential ever being read. The role now clears any audit ACE from the
+  folders and sets `ReadData` Success on each masterkey/credential *file*
+  directly (inheritance is blocked, so it is applied per file, recursively).
+  Result: a folder listing audits nothing, and only an actual read of a
+  file's DATA -- the dump -- generates a 4663. Confirmed live on workstation:
+  folder SACL count 0, file SACL count 1 (ReadData/Success); reading a
+  masterkey and a credential blob each produced one 4663; 90s of idle
+  produced none. Applied live to all 7 hosts; durable in
+  configure_sacls_common.ps1. Caveat: a masterkey rotated *after*
+  provisioning is not audited until the role re-runs (files-only means no
+  folder ACE to inherit onto new files) -- acceptable for a snapshot-based
+  range, and the deliberate trade for zero enumeration false positives.
 known_false_positives: >-
   None found over 4h of normal range background traffic.
+
+  v5 (2026-09-30): the false-positive class is eliminated at the source --
+  the SACL is now on the files only (see how_to_implement), so directory
+  enumeration generates no telemetry and the detection cannot fire on it.
+  The search matches a `ReadData` 4663 on a masterkey/credential file, so
+  the only way to trigger it is to actually read one of those files' data --
+  a dump (mimikatz dpapi, SharpDPAPI, impacket dpapi, or a manual file
+  copy). `masterkeys` lists the read Protect-store files (masterkey GUIDs,
+  Preferred, CREDHIST) and `credentials` the read credential blobs, so the
+  embed shows exactly which files were read. lsass.exe is excluded (it reads
+  masterkeys legitimately as the DPAPI provider).
 throttle: [attacker_ip, host, user]
 changes_2026_09_30: >-
   Grouped by attacker (was by host+user+10s bucket: two attackers merged,
@@ -56,7 +90,8 @@ embed:
   additional_fields:
     - host
     - user
-    - files
+    - masterkeys
+    - credentials
 references:
   - 'detections/backlog.md, "Credential & ticket dumping" (backlog row: "DPAPI masterkey / credential file theft")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
