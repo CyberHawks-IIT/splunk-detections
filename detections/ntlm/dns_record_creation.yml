@@ -18,9 +18,11 @@ data_source:
 search: |-
   index=windows EventCode=5137 Class=dnsNode `detection_window`
   | rex field=DN "^DC=(?<name>[^,]+)"
+  | rex field=_raw "Account Name:\s*(?<subj>[^\r\n]+)"
+  | where subj!="SYSTEM" AND NOT match(subj,"\$$")
   | `subject_session`
   | `logon_source`
-  | stats values(Account_Name) as user by attacker_ip name
+  | stats values(subj) as user by attacker_ip name
   | `normalize_user(user)`
   | table attacker_ip user name
 how_to_implement: >-
@@ -43,11 +45,14 @@ how_to_implement: >-
   ScriptPath Attribute Tampering) -- each will need its own scoped SACL on
   its own target object the same way, not assumed to already work.
 known_false_positives: >-
-  None found -- zero dnsNode creation events in 24h of range background
-  traffic before this session's live test (though most of that window
-  predates the SACL fix, so this baseline is short). This range's DNS
-  records were all provisioned once at build time with no ongoing dynamic
-  registration expected. **Real, documented limitation, not a gap in this
+  The AD DNS server itself creates/refreshes dnsNode objects as SYSTEM
+  (S-1-5-18) -- e.g. the zone bookkeeping node `..SerialNo-<DC>` -- which
+  originally false-fired this detection as `user=SYSTEM`. Creations by
+  SYSTEM and by machine accounts (name ending in `$`) are now excluded, so
+  only a named-account creation (the attacker path, e.g. dnstool.py as a
+  domain user) fires. This range's user DNS records were all provisioned
+  once at build time with no ongoing dynamic registration by named accounts
+  expected. **Real, documented limitation, not a gap in this
   search:** the Alert Embed Planner asks for an `ip` field (the address
   the new record points to), but Windows logs the DNS record's actual
   value as opaque `<Binary>` in the accompanying 5136 attribute-value
