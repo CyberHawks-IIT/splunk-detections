@@ -1,0 +1,69 @@
+name: 'Lateral Movement: RDP'
+id: lateral-movement-rdp
+version: 1
+date: '2026-09-30'
+status: production
+category: lateral-movement
+description: >-
+  A remote interactive (RDP) logon established on a range host by a source
+  other than this project's own control host. An RDP session is created with
+  Windows logon type 10 (RemoteInteractive), which fires on connect -- the
+  moment the session is established -- not on disconnect or reconnect (logon
+  type 7). Using valid credentials to RDP into a host is a common
+  lateral-movement primitive, distinct from the WinRM / PsExec /
+  scheduled-task / WMI remote-execution paths covered by their own detections.
+data_source:
+  - >-
+    Windows Events -- 4624 (an account was successfully logged on) with
+    Logon Type 10 (RemoteInteractive), already forwarded via the Security
+    channel whitelist. The RDP client IP is the event's own Source Network
+    Address and the account is the New Logon account, so no session-trace
+    join is needed.
+search: |-
+  index=windows source="WinEventLog:Security" EventCode=4624 Logon_Type=10 `detection_window`
+  | eval attacker_ip=replace(mvindex(Source_Network_Address,-1),"^::ffff:","")
+  | eval user=replace(mvindex(Account_Name,-1),"@.*","")
+  | rex field=ComputerName "(?<host>[^.]+)"
+  | where attacker_ip!="10.0.2.1" AND attacker_ip!="-" AND isnotnull(attacker_ip) AND attacker_ip!=""
+  | stats count by attacker_ip host user
+  | `normalize_host(host)`
+  | `normalize_user(user)`
+  | table attacker_ip host user
+how_to_implement: >-
+  No infra fix needed -- 4624 is already forwarded (Security channel
+  whitelist in defense-tooling monitor.yml) and Logon Type 10 is logged by
+  default. The RDP client IP is carried directly in the event's Source
+  Network Address and the logged-on account is the New Logon account (the
+  last value of the multivalue Account_Name on a 4624), so attribution needs
+  no join. Logon Type 10 is the RemoteInteractive *connect*; type 7
+  (reconnect to an existing session) and the 4634/4647 logoff events are
+  deliberately not matched, so this fires once when the session is created.
+known_false_positives: >-
+  Any legitimate administrative RDP into a range host would match. This
+  control host's own NAT'd management IP (10.0.2.1, the same address excluded
+  by the WinRM and NTLM detections) is excluded. No other routine RDP exists
+  in this range day to day; revisit if an admin jump-host over RDP is added.
+throttle: [attacker_ip, host, user]
+verification:
+  date: '2026-09-30'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    HOME=/root xvfb-run -a xfreerdp /v:10.0.2.8 /u:Administrator /p:<shared
+    lab password> /cert:ignore /sec:nla against workstation -- a full
+    (not +auth-only) headless RDP session so the target creates a type-10
+    RemoteInteractive logon, held ~15s then torn down. +auth-only / netexec
+    rdp were avoided because an NLA-only handshake produces a type-3 network
+    logon, not the type-10 session logon this detection keys on.
+  result: >-
+    Fired once, attributing 192.168.1.11 / workstation / Administrator from
+    the 4624 (Logon Type 10) Source Network Address and New Logon account.
+embed:
+  title: 'Lateral Movement: RDP'
+  additional_fields:
+    - host
+    - user
+references:
+  - 'detections/backlog.md, "Lateral movement" (RDP logon)'
+  - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
+disabled: false
