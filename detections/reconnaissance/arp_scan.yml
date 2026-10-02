@@ -1,0 +1,70 @@
+name: ARP Scan
+id: recon-arp-scan
+version: 1
+date: '2026-10-02'
+status: production
+category: reconnaissance
+description: >-
+  One host broadcasting ARP requests for 5+ distinct addresses within 10s --
+  host discovery on its own subnet (nmap -sn / -PR, arp-scan, netdiscover).
+  On a local subnet nmap discovers hosts with ARP instead of ICMP, so this is
+  the same-subnet counterpart of Ping Sweep, and like Ping Sweep it lists the
+  addresses that were probed.
+data_source:
+  - >-
+    Zeek `arp_request.log` (`zeek:arp_request`), a broadcast-ARP-request log
+    added to the sensor's cyberhawks.zeek for this detection
+search: |-
+  index=zeek sourcetype=zeek:arp_request earliest=-30m latest=+5m NOT orig_h IN ("10.0.2.1", "192.168.1.1")
+  | eval new_event=if(`in_detection_window(_indextime)`, 1, 0)
+  | lookup known_range_hosts ip AS resp_h OUTPUT hostname AS resp_name
+  | eval resp_host=coalesce(resp_name, resp_h)
+  | sort 0 _time
+  | streamstats time_window=10s dc(resp_h) as distinct_hosts values(resp_host) as hosts max(new_event) as has_new by orig_h
+  | where distinct_hosts>=5 AND has_new=1
+  | stats values(hosts) as hosts by orig_h
+  | rename orig_h as attacker_ip
+  | `normalize_host(hosts)`
+  | table attacker_ip hosts
+how_to_implement: >-
+  Zeek has no ARP log, so the zeek_sensor role's cyberhawks.zeek gained an
+  `ArpRequest` module (2026-10-02) that logs broadcast who-has requests only:
+  a host scanning its subnet must broadcast, since it doesn't know the targets'
+  MACs, while ordinary hosts mostly send unicast cache refreshes to MACs they
+  know. ARP probes (sender 0.0.0.0) and gratuitous ARP (sender == target) are
+  skipped. Measured on the mirror feed before enabling: 69 ARP requests in 10
+  minutes, 5 broadcast, so ~700 lines (~70 KB) a day versus ~1 MB/day for all
+  requests; a full /24 scan adds ~25 KB. Forwarded as `arp_request.log`
+  (defense-tooling `host_vars/zeek.yml`), fields extracted by
+  `dt_detection_content`'s `[zeek:arp_request]`. ARP never crosses the router,
+  so this only sees scans from a host on a mirrored vnet (`ad`: the range hosts
+  and the test box); a scan from john-kali's own subnet is invisible to it.
+known_false_positives: >-
+  The router's own requests (10.0.2.1 on the range vnet, 192.168.1.1 on the
+  attacker vnet, both captured through its mirrored ports) are excluded: it
+  ARPs for each destination when routing traffic in, so a routed ping sweep or
+  port scan from john-kali would otherwise make the router look like an ARP
+  scanner. That traffic is reported by Ping Sweep / Port Scan with the real
+  source. Same 5-in-10s threshold as Ping Sweep; a range host does not
+  normally broadcast for 5 different addresses that fast.
+throttle: [attacker_ip]
+verification:
+  date: '2026-10-02'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: test box (VMID 350, 10.0.2.10)
+  technique: >-
+    40 broadcast ARP who-has frames for 10.0.2.20-59 sent 50 ms apart from a
+    raw AF_PACKET socket (what nmap -sn sends on a local subnet; nmap is not
+    installed on the test box)
+  result: >-
+    Fired once: attacker_ip 10.0.2.10, hosts = the 40 addresses probed
+    (range hosts by name). All 40 requests were logged to arp_request.log;
+    nothing else fired from the baseline broadcast ARP.
+embed:
+  title: ARP Scan
+  additional_fields:
+    - hosts
+references:
+  - User request 2026-10-02 (new detection, named by the user)
+  - Ping Sweep (same windowing and output)
+disabled: false

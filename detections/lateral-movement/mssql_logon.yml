@@ -1,0 +1,88 @@
+name: 'Lateral Movement: MSSQL'
+id: lateral-movement-mssql
+version: 1
+date: '2026-10-02'
+status: production
+category: lateral-movement
+description: >-
+  A successful login to a SQL Server instance (sql1/sql2) from another
+  machine. Logging in to a database server with stolen or weak credentials
+  (a domain account over Windows Authentication, or a SQL login such as `sa`)
+  is the entry point for every SQL Server technique in this range -- the
+  EXECUTE AS chain, xp_cmdshell, xp_dirtree coercion and the linked-server
+  pivot -- so it is reported on its own, the way RDP and WinRM logons are.
+data_source:
+  - >-
+    SQL Server Audit, SUCCESSFUL_LOGIN_GROUP (`mssql_audit`, action_id LGIS):
+    the login's principal and, in additional_information, the client address
+  - >-
+    SQL Server Extended Events `oledb_provider_information` (`mssql_xe_text`),
+    to recognise the login a linked server makes on the attacker's behalf
+search: |-
+  index=mssql sourcetype=mssql_audit action_id=LGIS `detection_window`
+  | eval event_epoch=strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z")
+  | where isnotnull(event_epoch) AND _time - event_epoch <= 600
+  | eval host=replace(source, "_mssql_audit", ""), attacker_ip=client_address, user=server_principal_name
+  | where isnotnull(attacker_ip) AND attacker_ip!="local machine" AND attacker_ip!="10.0.2.1" AND NOT (user="svc-sqlmonitor" AND attacker_ip="10.0.10.2")
+  | lookup known_range_hosts ip AS attacker_ip OUTPUT hostname AS client_host
+  | eval client_host=lower(client_host)
+  | join type=left client_host [ search index=mssql sourcetype=mssql_xe_text event_name=oledb_provider_information earliest=-30m latest=+5m | eval client_host=lower(replace(source, "_mssql_xe_text", "")), link=floor(strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z")) . "|" . lower(linked_server_name) | stats values(link) as links by client_host | eval links=mvjoin(links, ";") ]
+  | eval links=split(links, ";")
+  | eval hop=mvmap(links, if(abs(tonumber(mvindex(split(links, "|"), 0)) - event_epoch) <= 5 AND mvindex(split(links, "|"), 1)=lower(host), 1, null()))
+  | where isnull(hop)
+  | stats count by attacker_ip host user
+  | `normalize_host(host)`
+  | `normalize_user(user)`
+  | table attacker_ip host user
+how_to_implement: >-
+  No new telemetry: the SQL login audit (SUCCESSFUL_LOGIN_GROUP in cyber-range
+  `detection_logging`'s `mssql_detection_audit.sql`) and its client address
+  (defense-tooling's DB Connect audit query) were added 2026-09-30 to give the
+  other SQL detections their attacker IP, and this reads the same rows. The
+  client address is in the login record itself, so no join is needed for the
+  attacker IP. Arrival time is DB Connect's 5s poll plus the audit's 1s queue
+  delay.
+known_false_positives: >-
+  Baseline (24h before this detection was written): the only logins from
+  another machine were DB Connect's own monitoring login (`svc-sqlmonitor`
+  from the indexer, 10.0.10.2, excluded by account AND address so the same
+  account from anywhere else still fires), sql1's linked-server login to sql2
+  (`sa` from 10.0.2.6, see below), and real test activity. Logins the server
+  makes to itself ("local machine": SQL Agent, SQLTELEMETRY, a local sqlcmd)
+  are not lateral movement and are skipped, as is this project's control host
+  (10.0.2.1, excluded the same way by the RDP/WinRM detections). Linked-server
+  hops: running a query through sql1's link logs a login on sql2 from sql1's
+  own IP as the mapped `sa`. That is reported by Linked Server Execution, with
+  the real attacker's IP, so here a login from a range SQL server is dropped
+  when that server raised an `oledb_provider_information` naming this server
+  within 5s of it. A login from a range SQL server with no such event (someone
+  on sql1's OS connecting to sql2 directly) still fires. A login is logged
+  per connection, including each reuse of a pooled connection, so a tool
+  making many connections still produces one alert per attacker, server and
+  account per throttle period. Successful logins only; failed SQL logins are
+  not collected.
+throttle: [attacker_ip, host, user]
+verification:
+  date: '2026-10-02'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: john-kali (VM 611, 192.168.1.11)
+  technique: >-
+    impacket-mssqlclient cyberhawks.lab/dsmith@10.0.2.6 -windows-auth, then
+    EXECUTE AS LOGIN = 'sa' and SELECT * FROM OPENQUERY([SQL2], ...) -- a
+    Windows-auth login to sql1 followed by a linked-server pivot to sql2
+  result: >-
+    Fired once: attacker_ip 192.168.1.11, host sql1, user dsmith (Discord
+    "John Ford (192.168.1.11)"). The pivot's own login on sql2 (`sa` from
+    sql1's 10.0.2.6) was correctly dropped as a linked-server hop, and
+    Linked Server Execution reported it with the real IP instead. Replayed over
+    the day's earlier MSSQLHound activity: john-windows (192.168.1.10) as
+    Administrator to sql1 and sql2, john-kali as user/svc-mssql, and no rows
+    for DB Connect's svc-sqlmonitor or local-machine logins.
+embed:
+  title: 'Lateral Movement: MSSQL'
+  additional_fields:
+    - host
+    - user
+references:
+  - User request 2026-10-02 (new detection, named by the user)
+disabled: false

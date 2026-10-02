@@ -1,25 +1,27 @@
 name: Linked Server Execution
 id: sql-server-linked-server-execution
-version: 5
-date: '2026-09-30'
+version: 6
+date: '2026-10-02'
 status: production
 category: sql-server
 description: >-
-  A query against a linked server (`OPENQUERY`) -- sql1's link to sql2 maps
-  all local logins to a fixed `sa` identity rather than delegating the
-  caller's own identity, so any `sysadmin` on sql1 (reached via the
-  EXECUTE AS chain) pivots straight to `sysadmin` on sql2 too, as a plain
-  domain user.
+  A SQL Server instance opening a connection to a linked server on behalf of a
+  session -- the moment a query actually runs through a link, whatever the
+  syntax (`OPENQUERY`, a four-part `[server].db.schema.object` name,
+  `EXEC (...) AT [server]`). sql1's link to sql2 maps all local logins to a
+  fixed `sa` identity rather than delegating the caller's own identity, so any
+  `sysadmin` on sql1 (reached via the EXECUTE AS chain) pivots straight to
+  `sysadmin` on sql2 too, as a plain domain user.
 data_source:
   - >-
-    SQL Server Extended Events (`detection_sql_text` session), sql_text
-    matching OPENQUERY
+    SQL Server Extended Events (`detection_sql_text` session),
+    `oledb_provider_information` -- one event per connection SQL Server opens
+    to a linked server, with `linked_server_name` and the acting session_id
 search: |-
-  index=mssql sourcetype=mssql_xe_text sql_text="*OPENQUERY*" NOT username="svc-sqlmonitor" NOT username="NT SERVICE*" `detection_window`
+  index=mssql sourcetype=mssql_xe_text event_name=oledb_provider_information `detection_window`
   | eval event_epoch=strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z")
   | where isnotnull(event_epoch) AND _time - event_epoch <= 600
-  | eval host=replace(source, "_mssql_xe_text", "")
-  | rex field=sql_text "OPENQUERY\(\[?(?<linked>[^,\]]+)\]?,"
+  | eval host=replace(source, "_mssql_xe_text", ""), linked=lower(linked_server_name)
   | rename username as user
   | lookup known_range_hosts hostname AS host OUTPUT ip AS host_ip
   | join type=left host session_id [ search index=mssql sourcetype=mssql_audit action_id=LGIS earliest=-7d latest=+5m | eval host=replace(source, "_mssql_audit", ""), login=tostring(floor(strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z"))) . "|" . client_address | stats values(login) as logins by host session_id | eval logins=mvjoin(logins, ";") ]
@@ -29,12 +31,17 @@ search: |-
   | eval attacker_ip=if(attacker_ip="local machine", host_ip, attacker_ip)
   | stats values(attacker_ip) as attacker_ip by host session_id user linked
   | `normalize_host(host)`
+  | `normalize_host(linked)`
   | `normalize_user(user)`
   | table attacker_ip host user linked
 how_to_implement: >-
-  Same data source and operational gotcha as xp_cmdshell Execution --
-  DB Connect's `detection_sql_text` XE input, already live. See that
-  detection's how_to_implement for the checkpoint/timeout note.
+  Needs the `oledb_provider_information` event in the `detection_sql_text` XE
+  session (cyber-range `detection_logging`'s `mssql_detection_audit.sql`) and
+  the `linked_server_name` column in DB Connect's XE query (defense-tooling
+  `splunk_indexer`'s `mssql_xe_query.sql.j2`), both added 2026-10-02. The
+  event has no predicate: nothing in this range uses a linked server except an
+  attacker, so it is a handful of rows. See xp_cmdshell Execution's
+  how_to_implement for the shared DB Connect checkpoint/timeout note.
 known_false_positives: >-
   None -- this linked server exists solely for this range's designed
   vulnerability (per cyber-range's VULNERABLE_RANGE_PLAN.md), no legitimate
@@ -71,6 +78,26 @@ known_false_positives: >-
   one ;-joined string: `join` flattens a multivalue field into a single
   newline-joined value, which made the first live test pick the wrong
   login.)
+changes_2026_10_02: >-
+  Re-anchored from statement text onto the server's own linked-server
+  connection event. The old search matched any statement containing
+  `OPENQUERY` and pulled the linked server name out of the text with a rex.
+  Run against MSSQLHound's linked-server enumeration it fired on both sql1 and
+  sql2 with `linked = "' + @CheckLinkedServer + '"`: the enumeration batch
+  BUILDS an `OPENQUERY(['+ @var +'], ...)` string in T-SQL, so the rex read
+  string-concatenation code as the server name, and on sql2 (which has no
+  linked servers at all) nothing ran through a link but it still fired. The
+  text match also missed four-part names and `EXEC ... AT`. The new trigger is
+  the XE event `oledb_provider_information`, which SQL Server raises only
+  when it actually opens a connection to a linked server, with the real
+  `linked_server_name`. Verified on sql1 with a temporary session: a script
+  that only mentions OPENQUERY -> no event; one OPENQUERY, two OPENQUERYs in
+  one batch, and a four-part-name query -> one event each, all naming SQL2.
+  Note that on sql1, MSSQLHound's enumeration does run a privilege-check query
+  ON sql2 through the link (as the mapped `sa`), so it is genuine linked-server
+  execution and still fires there, now correctly naming sql2; it no longer
+  fires on sql2. `OPENQUERY` was dropped from the XE text predicate (nothing
+  else used it).
 throttle: [attacker_ip, host, user, linked]
 changes_2026_09_30: >-
   Deduplicated to one row per SQL session (host + session_id) and linked

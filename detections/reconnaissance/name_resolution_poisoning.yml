@@ -1,7 +1,7 @@
 name: Name Resolution Poisoning
 id: recon-name-resolution-poisoning
-version: 4
-date: '2026-09-30'
+version: 5
+date: '2026-10-02'
 status: production
 category: reconnaissance
 description: >-
@@ -28,8 +28,10 @@ search: |-
   | where isnotnull(responder) AND isnotnull(query_times)
   | eval answered=mvmap(query_times, if(conn_ts>=query_times-1 AND conn_ts<=query_times+5, 1, null())), answered_new=mvmap(new_query_times, if(conn_ts>=new_query_times-1 AND conn_ts<=new_query_times+5, 1, null()))
   | where isnotnull(answered) AND (new_event=1 OR isnotnull(answered_new))
-  | stats values(protocol) as protocols by responder querier
-  | rename responder as attacker_ip, querier as target
+  | eval responder_mac=if(responder=id_orig_h, orig_l2_addr, resp_l2_addr), querier_mac=if(querier=id_orig_h, orig_l2_addr, resp_l2_addr)
+  | eval responder_key=if(isnull(responder_mac) OR responder_mac="-", responder, responder_mac), querier_key=if(isnull(querier_mac) OR querier_mac="-", querier, querier_mac)
+  | stats values(protocol) as protocols values(responder) as responders values(querier) as queriers by responder_key querier_key
+  | eval attacker_ip=coalesce(mvindex(mvfilter(NOT like(responders, "%:%")), 0), mvindex(responders, 0)), target=coalesce(mvindex(mvfilter(NOT like(queriers, "%:%")), 0), mvindex(queriers, 0))
   | lookup known_range_hosts ip AS target OUTPUT hostname AS target_name | eval target=coalesce(target_name, target)
   | `normalize_host(target)`
   | table attacker_ip target protocols
@@ -89,6 +91,24 @@ known_false_positives: >-
   poisoning. The `ports` field became `protocols` (LLMNR/mDNS/NBNS). `name`
   and `ip` remain unobtainable: Zeek writes no dns.log rows for these ports
   and has no NBNS/LLMNR/mDNS log at all (re-confirmed 2026-09-30).
+changes_2026_10_02: >-
+  Grouped by MAC address instead of IP. Responder answers a victim's IPv4 and
+  IPv6 link-local queries alike, so one poisoning round from the test box
+  posted two alerts: Unknown (10.0.2.10) and Unknown
+  (fe80::be24:11ff:fef4:c79), the same host's two addresses. Zeek now records
+  the two MAC addresses on LLMNR/mDNS/NBNS flows only (defense-tooling
+  zeek_sensor cyberhawks.zeek, `orig_l2_addr`/`resp_l2_addr`, "-" on every
+  other conn.log line), the poisoner and the victim are each keyed by MAC, and
+  the alert reports each one's IPv4 address when it has one (IPv6 only if that
+  is all it used). Falls back to the IP when no MAC was recorded (flows from
+  before this change). Also investigated a reported miss the same day (a real
+  Responder run that captured hashes but never alerted): the detection was
+  fine; the test box had been rebooted from inside the container, which
+  recreated its veth without re-applying the Zeek mirror, so its replies never
+  reached the sensor. Fixed in defense-tooling's mirror-vnet-guests.sh (a udev
+  rule re-applies the mirror on any interface re-creation); verified with an
+  in-guest reboot followed by Responder, which fired ~4s after the poisoned
+  answers.
 throttle: [attacker_ip, target]
 changes_2026_09_30: >-
   Zeek writes a UDP flow only after ~1 minute of inactivity, so the query

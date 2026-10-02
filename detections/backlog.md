@@ -18,6 +18,9 @@ category table below.
 
 | Detection | Verified | YAML | Notes |
 |---|---|---|---|
+| Lateral Movement: MSSQL | 2026-10-02 | [lateral-movement/mssql_logon.yml](lateral-movement/mssql_logon.yml) | Successful SQL Server login from another machine, from the SQL login audit (LGIS) already collected for the other SQL detections' attacker IP. Excludes DB Connect's own login, local-machine logins and the control host, and drops the login a linked server makes on the attacker's behalf (paired to the source server's `oledb_provider_information` event; Linked Server Execution reports that hop). Live: dsmith from john-kali to sql1 fired once; the sql1->sql2 `sa` hop did not |
+| Password Change | 2026-10-02 | [ad-persistence/password_change.yml](ad-persistence/password_change.yml) | 4723 (own change) + 4724 (reset by another account), added to the forwarder whitelist (baseline ~0 events/day). Subject Logon ID -> 4624 trace for the attacker IP, with the NTLM paired-logon fallback. Excludes SYSTEM (LAPS rotation) and cloudbase-init's boot-time self-reset. Live: `user` resetting skhan (ForceChangePassword) and changing its own password from john-kali, both fired |
+| ARP Scan | 2026-10-02 | [reconnaissance/arp_scan.yml](reconnaissance/arp_scan.yml) | New Zeek `arp_request.log` (broadcast who-has only, ~70 KB/day). 5+ distinct targets in a sliding 10s window per sender, like Ping Sweep; the router's own ARPs are excluded. Same-vnet only (ARP doesn't cross the router). Live: a 40-address broadcast sweep from the test box fired once |
 | Ping Sweep | 2026-09-27 | [reconnaissance/ping_sweep.yml](reconnaissance/ping_sweep.yml) | Live `nmap -sn` sweep from john-kali against all 7 range hosts, fired exactly once, no false positives over 1h |
 | Web Credential Read (Web.config.bak) | 2026-09-29 | [web-application/web_config_bak_leak.yml](web-application/web_config_bak_leak.yml) | IIS log on `web` (index=iis): any 200 to a config-backup path (`.bak`/`.old`/`.backup`/`.save`/`.orig`/bare `.config`/`~`). Live `curl Web.config.bak` from john-kali -> fired once (Source=c_ip, file). Needed the IIS HTTP.SYS boot-clock latch fixed first (was stamping log lines ~1h in the future); IIS log buffering also disabled (cyber-range) so lines flush immediately. Trailing 1-min window (`earliest=-2m latest=-1m`) to clear IIS delivery lag |
 | Certificate Request (HTTP) | 2026-09-29 | [adcs/certificate_request_http.yml](adcs/certificate_request_http.yml) | ESC8 web enrollment. Anchors on the CA 4887 (certificate issued) filtered to `DCOMorRPC=DCOM` (web enrollment's transport, vs RPC for ICPR), grouped **per Request ID**, inner-joined to an authenticated `POST /certsrv/certfnsh.asp` (200) in ca's IIS log to confirm HTTP and attach the attacker `c_ip`. Live `certipy-ad req -web` from john-kali, ids 5-12 across runs; each cert request surfaces as its own alert row (verified 4 concurrent). Doesn't collide with Certificate Request (RPC) (DCOM vs RPC, and no IIS leg there) |
@@ -80,7 +83,9 @@ a detection's log source changes.
 
 | Log | Used by |
 |---|---|
-| `conn.log` | Network scanning, DCSync (IP), ADCS RPC/ICPR (IP), pass-the-ticket correlation |
+| `conn.log` | Network scanning, name resolution poisoning (with MACs on LLMNR/mDNS/NBNS flows), DCSync (IP), ADCS RPC/ICPR (IP), pass-the-ticket correlation |
+| `conn_open.log` | LDAP Query (ADWS client IP, ldap vs ldaps) |
+| `arp_request.log` | ARP Scan |
 | `dns.log` | Zone transfer, name resolution poisoning (LLMNR/mDNS portion) |
 | `dce_rpc.log` | SAM/LSA remote enumeration |
 | `kerberos.log` | Pass-the-ticket / ticket reuse |

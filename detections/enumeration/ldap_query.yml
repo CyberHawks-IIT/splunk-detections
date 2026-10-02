@@ -1,7 +1,7 @@
 name: LDAP Query
 id: enumeration-ldap-query
-version: 7
-date: '2026-09-30'
+version: 8
+date: '2026-10-02'
 status: production
 category: enumeration
 description: >-
@@ -31,6 +31,9 @@ search: |-
   index=windows source="WinEventLog:Directory Service" EventCode=1644 `detection_window`
   | rex field=_raw "Client:\r?\n\s*(?<client_raw>[^\r\n]+)"
   | rex field=_raw "Filter:\r?\n\s*(?<query>.+?)\s*\r?\n"
+  | rex field=_raw "Attribute selection:\r?\n(?<attributes>[^\r\n]*)"
+  | eval attributes=split(replace(replace(trim(attributes), "^\[all(_with_list)?\]", "*,"), ",$", ""), ",")
+  | eval attributes=mvmap(attributes, if(trim(attributes)="", null(), trim(attributes)))
   | rex field=_raw "User:\r?\n\s*(?<user>\S+)"
   | eval client_raw=trim(client_raw)
   | rex field=client_raw "^\[?(?<client_ip>[^\]\s]+?)\]?:(?<client_port>\d+)$"
@@ -57,10 +60,10 @@ search: |-
   | eval attacker_ip=if(is_adws=1, adws_ip, client_ip)
   | eval protocol=case(is_adws=1, "adws", dport=389, "ldap", dport=636, "ldaps", true(), "ldap")
   | where isnotnull(attacker_ip)
-  | stats values(user) as user values(query) as query by attacker_ip host protocol
+  | stats values(user) as user values(query) as query values(attributes) as attributes by attacker_ip host protocol
   | `normalize_host(host)`
   | `normalize_user(user)`
-  | table attacker_ip host protocol user query
+  | table attacker_ip host protocol user query attributes
 how_to_implement: >-
   **1644 must log every search, with the thresholds at 1, not 0.**
   cyber-range's `configure_1644.ps1` sets Field Engineering (NTDS\Diagnostics
@@ -113,6 +116,13 @@ known_false_positives: >-
   Zeek-anchored version needed a "history contains D" guard for exactly that;
   no longer relevant). Revisit if a legitimate non-domain-joined LDAP/ADWS
   client (a vulnerability scanner, a monitoring agent) is ever added.
+changes_2026_10_02: >-
+  Added `attributes`: the attribute list each search asked for, from the
+  1644's "Attribute selection" (already in the event, so no new data), split
+  into individual names and de-duplicated across the grouped queries. "*"
+  stands for "all attributes" (1644's `[all]` / `[all_with_list]` prefix).
+  Replayed against the day's real activity: john-kali's LAPS read showed
+  `msLAPS-EncryptedPassword msLAPS-Password sAMAccountName`.
 throttle: [attacker_ip, host, protocol]
 changes_2026_09_30: >-
   Re-anchored from the Zeek `conn.log` flow onto the DC's 1644 event, as part
@@ -173,6 +183,7 @@ embed:
     - protocol
     - user
     - query
+    - attributes
 references:
   - 'detections/backlog.md, "Enumeration (info pulled)" (backlog row: "LDAP query content")'
   - Alert Embed Planner (see splunk-detections memory reference_alert_embed_planner.md)
