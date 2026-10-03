@@ -18,6 +18,7 @@ category table below.
 
 | Detection | Verified | YAML | Notes |
 |---|---|---|---|
+| DHCPv6 Spoofing | 2026-10-03 | [reconnaissance/dhcpv6_spoofing.yml](reconnaissance/dhcpv6_spoofing.yml) | A rogue DHCPv6 server reply (Zeek conn.log, UDP src 547 -> dst 546), which nothing in the range legitimately sends. No new ingest (conn.log already forwarded). DHCPv6 is IPv6-only, so attacker_ip is the poisoner's link-local and the `mac` field (from the L2 columns added to these flows, ~0.3 MB/day) is the stable identifier; `targets` are the answered clients. Live: mitm6 from the test box while forcing solicits (ipconfig /renew6) fired once, mac=bc:24:11:f4:0c:79 |
 | Lateral Movement: MSSQL | 2026-10-02 | [lateral-movement/mssql_logon.yml](lateral-movement/mssql_logon.yml) | Successful SQL Server login from another machine, from the SQL login audit (LGIS) already collected for the other SQL detections' attacker IP. Excludes DB Connect's own login, local-machine logins and the control host, and drops the login a linked server makes on the attacker's behalf (paired to the source server's `oledb_provider_information` event; Linked Server Execution reports that hop). Live: dsmith from john-kali to sql1 fired once; the sql1->sql2 `sa` hop did not |
 | Password Change | 2026-10-02 | [ad-persistence/password_change.yml](ad-persistence/password_change.yml) | 4723 (own change) + 4724 (reset by another account), added to the forwarder whitelist (baseline ~0 events/day). Subject Logon ID -> 4624 trace for the attacker IP, with the NTLM paired-logon fallback. Excludes SYSTEM (LAPS rotation) and cloudbase-init's boot-time self-reset. Live: `user` resetting skhan (ForceChangePassword) and changing its own password from john-kali, both fired |
 | ARP Scan | 2026-10-02 | [reconnaissance/arp_scan.yml](reconnaissance/arp_scan.yml) | New Zeek `arp_request.log` (broadcast who-has only, ~70 KB/day). 5+ distinct targets in a sliding 10s window per sender, like Ping Sweep; the router's own ARPs are excluded. Same-vnet only (ARP doesn't cross the router). Live: a 40-address broadcast sweep from the test box fired once |
@@ -83,7 +84,7 @@ a detection's log source changes.
 
 | Log | Used by |
 |---|---|
-| `conn.log` | Network scanning, name resolution poisoning (with MACs on LLMNR/mDNS/NBNS flows), DCSync (IP), ADCS RPC/ICPR (IP), pass-the-ticket correlation |
+| `conn.log` | Network scanning, name resolution poisoning and DHCPv6 spoofing (with MACs on LLMNR/mDNS/NBNS/DHCPv6 flows), DCSync (IP), ADCS RPC/ICPR (IP), pass-the-ticket correlation |
 | `conn_open.log` | LDAP Query (ADWS client IP, ldap vs ldaps) |
 | `arp_request.log` | ARP Scan |
 | `dns.log` | Zone transfer, name resolution poisoning (LLMNR/mDNS portion) |

@@ -1,0 +1,73 @@
+name: DHCPv6 Spoofing
+id: recon-dhcpv6-spoofing
+version: 1
+date: '2026-10-03'
+status: production
+category: reconnaissance
+description: >-
+  A rogue DHCPv6 server answering clients on the network (mitm6, Inveigh).
+  Windows hosts multicast a DHCPv6 Solicit (UDP 546 -> ff02::1:2 port 547)
+  periodically; nothing in this range ever answers, because there is no
+  DHCPv6 server. An attacker runs one to hand out its own address as the
+  clients' DNS server, then answers their name queries (the WPAD / NTLM-relay
+  primitive). The signal is the thing that should never happen: a unicast
+  DHCPv6 server reply (source port 547 to a client's port 546).
+data_source:
+  - >-
+    Zeek conn.log, UDP source port 547 to destination port 546 (a DHCPv6
+    server Advertise/Reply). The poisoner's MAC is logged on these flows
+    (zeek_sensor cyberhawks.zeek) and reported, since DHCPv6 is IPv6-only and
+    the poisoner otherwise appears only as a link-local address
+search: |-
+  index=zeek sourcetype=zeek:conn proto=udp id_orig_p=547 id_resp_p=546 earliest=-30m latest=+5m
+  | eval new_event=if(`in_detection_window(_indextime)`, 1, 0)
+  | eval attacker_ip=id_orig_h
+  | lookup known_range_hosts ip AS id_resp_h OUTPUT hostname AS client_name
+  | eval client=coalesce(client_name, id_resp_h)
+  | stats max(new_event) as has_new values(client) as targets values(orig_l2_addr) as mac by attacker_ip
+  | where has_new=1
+  | eval mac=mvjoin(mvdedup(mvfilter(mac!="-")), " ")
+  | `normalize_host(targets)`
+  | table attacker_ip mac targets
+how_to_implement: >-
+  Needs no new log source: conn.log is already forwarded. The MAC on these
+  DHCPv6 flows comes from the L2-address columns added to conn.log for the
+  name-resolution ports (zeek_sensor cyberhawks.zeek, 2026-10-03), which cost
+  about 0.3 MB/day total. DHCPv6 is IPv6-only, so the poisoner appears only as
+  its link-local address (attacker_ip); its real Ethernet MAC is reported in
+  the `mac` field, which is the stable identifier here. Because this fires on
+  a server reply that has no legitimate counterpart in the range, there is no
+  threshold and no query/reply pairing as Name Resolution Poisoning needs.
+known_false_positives: >-
+  None possible in this range as designed: there is no DHCPv6 server, so any
+  DHCPv6 server reply at all is rogue. If a legitimate DHCPv6 server is ever
+  added, exclude its address. Attribution note (accepted): DHCPv6 is
+  IPv6-only, so attacker_ip is the poisoner's link-local address and the
+  Discord embed's attacker line shows "Unknown" for it (the Proxmox directory
+  keys on IPv4). The `mac` field carries the poisoner's real Ethernet address,
+  the stable identifier, and `targets` lists the hosts it answered.
+throttle: [attacker_ip, mac]
+verification:
+  date: '2026-10-03'
+  method: Live attack execution against the cyberhawks.lab range
+  attacker_source: test box (VMID 350, 10.0.2.10)
+  technique: >-
+    mitm6 -d cyberhawks.lab -i eth0, while forcing DHCPv6 Solicits with
+    ipconfig /renew6 on dc1, web and workstation
+    mitm6 assigned IPv6 addresses to dc1, web and workstation; Zeek logged the
+    unicast DHCPv6 server replies (fe80::be24:11ff:fef4:c79 port 547 -> each
+    client port 546) with the poisoner's MAC bc:24:11:f4:0c:79 (the test box's
+    eth0). Fired once to Discord: attacker_ip fe80::be24:11ff:fef4:c79 (shown
+    "Unknown" as expected for a link-local), mac bc:24:11:f4:0c:79, targets =
+    the clients' link-local addresses. The targets are link-local because
+    DHCPv6 solicits/replies are link-local only; they are not resolved to
+    hostnames (the range lookup is IPv4-keyed).
+embed:
+  title: DHCPv6 Spoofing
+  additional_fields:
+    - mac
+    - targets
+references:
+  - User request 2026-10-03 (new detection, named by the user)
+  - Name Resolution Poisoning (same L2/MAC handling and attribution gap)
+disabled: false
