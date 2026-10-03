@@ -367,7 +367,9 @@ detection and for anything added later.
   `` `in_detection_window(t)` ``, `` `subject_session` `` (host_key +
   session_id off a Windows Security event), `` `logon_source` `` (the
   4624 `Logon_ID`→`Source_Network_Address` trace + host-IP fallback that ~20
-  Windows detections shared verbatim), and `` `normalize_host(field)` `` /
+  Windows detections shared verbatim; since 2026-10-03 with a WinRM step in
+  between, see below), `` `winrm_open_source(src, t)` ``, and
+  `` `normalize_host(field)` `` /
   `` `normalize_user(field)` `` (the standard output-normalization `eval
   mvmap` pairs). Use them instead of re-pasting; they are the accuracy-neutral
   half of the "simplify" answer. The macros are in the app's `default/`, so
@@ -488,6 +490,39 @@ every same-vnet application-layer signal.
   shows exactly one record per uid (no double-capture); the cause was checksums.
 - **Snapshot owed** for 511 (this joins the Zeek-timeouts change already owed
   there).
+
+## WinRM sessions have no source address: attribution fallback (2026-10-03)
+
+A WinRM session's network logon (4624, type 3) records Source Network Address
+"-" on every Windows host, and on the two Server 2016 hosts (dc1, sql1, build
+14393) WinRM/Operational event 91 is also written with no data (no
+ResourceUri, no `clientIP`). So any action taken through an attacker's WinRM
+session was attributed to the host itself (`logon_source`'s host-IP
+fallback), Lateral Movement: WinRM never fired on dc1/sql1, and the
+Scheduled Task / Service Creation pairs classed such a session as "admin" and
+dropped it from both their lateral and local variants (no alert at all).
+
+- **Order of precedence (the user's requirement: Zeek is a fallback, not the
+  default):** the exact source on the session's own 4624 (or 91's clientIP)
+  always wins, since it is exact under any concurrency; then the NTLM
+  paired-logon twin where a detection already used it; then, only for a
+  network logon with no source, `` `winrm_open_source(src, t)` ``: the latest
+  WinRM (5985/5986) connection opened to that host in the 30s up to the logon,
+  from Zeek `conn_open`; then the host's own IP.
+- `conn_open` logs 5985/5986 since this change (defense-tooling
+  `cyberhawks.zeek`), ~750 connections/day, ~65 bytes each, in Splunk in under
+  a second, so it adds no latency.
+- It is a time join: two clients opening WinRM sessions to the same host
+  within the same few seconds could be confused. That is why it only fills a
+  gap and never overrides an exact source.
+- Applied to `logon_source` (15 detections), Password Change, Lateral
+  Movement: WinRM, and both Scheduled Task / Service Creation pairs. Verified
+  live from john-kali over netexec WinRM against dc1: Privileged Group
+  Membership add/remove, Lateral Movement: Scheduled Task, Lateral Movement:
+  WinRM and Password Change all alerted as 192.168.1.11; an SMB-based reset in
+  the same run still took its exact source.
+- Replay gotcha: these traces look back `-4h` from *now*, so replaying an
+  event older than 4h resolves to the host IP; test with fresh actions.
 
 ## Status
 

@@ -26,6 +26,8 @@ search: |-
   | eval fb_src=mvindex(split(mvindex(mvsort(fb_pair), -1), "|"), 1)
   | eval exact_src=if(exact_src IN ("-","127.0.0.1","::1","0.0.0.0",""),null(),exact_src)
   | eval src=coalesce(exact_src, fb_src)
+  | `winrm_open_source(src, subj_time)`
+  | eval src=coalesce(src, winrm_src)
   | eval path=case(subj_type!=3,"local", src=="10.0.2.1" OR isnull(src),"admin", true(),"lateral")
   | where path="lateral"
   | stats values(Subject_Account_Name) as user by src host_key Task_Name
@@ -59,6 +61,16 @@ known_false_positives: >-
   source-bearing logon in the previous 2 minutes, which could name another
   client using that account. It now requires that logon to be within 2
   seconds of the acting session's own logon on the same host.
+changes_2026_10_03: >-
+  Attacker IP gains a WinRM fallback (shared `winrm_open_source` macro), used
+  only when the acting session's 4624 has no source address and no NTLM twin.
+  A WinRM session's network logon has no source address on any Windows host,
+  so a task/service created through an attacker's WinRM session resolved no
+  source, was classed "admin" and dropped -- neither this detection nor its
+  lateral/local counterpart fired. Now the client is the latest WinRM
+  (5985/5986) connection opened to the host in the 30s up to that logon, from
+  Zeek conn_open; this project's control host still resolves to 10.0.2.1 and is
+  still treated as administration. The exact source, when present, always wins.
 throttle: [attacker_ip, host, task]
 changes_2026_09_30: >-
   One row per attacker, host and task (the minute bucket is gone). Runs
