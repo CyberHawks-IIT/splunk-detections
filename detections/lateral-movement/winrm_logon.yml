@@ -1,7 +1,7 @@
 name: 'Lateral Movement: WinRM'
 id: lateral-movement-winrm
-version: 3
-date: '2026-09-30'
+version: 4
+date: '2026-10-03'
 status: production
 category: lateral-movement
 description: >-
@@ -16,12 +16,22 @@ data_source:
     Microsoft-Windows-WinRM/Operational, EventCode 91 ("Creating WSMan
     shell on server" -- fires once per interactive/PowerShell remoting
     session, with the target account and client IP embedded in the message
-    text)
+    text). On the Windows Server 2016 hosts (dc1, sql1) event 91 carries no
+    data, so the client comes from Zeek `conn_open` (WinRM connection opens)
+    and the account from the session's 4624
 search: |-
   index=windows LogName="Microsoft-Windows-WinRM/Operational" EventCode=91 `detection_window`
   | rex field=_raw "\\\\(?<user>\S+) clientIP: (?<attacker_ip>[\d\.]+)\)"
+  | rex field=_raw "(?m)^Sid=(?<user_sid>S-1-\S+)"
   | rex field=ComputerName "(?<host>[^.]+)"
-  | where attacker_ip!="10.0.2.1"
+  | eval host=lower(host)
+  | join type=left host [ search index=zeek sourcetype=zeek:conn_open (id_resp_p=5985 OR id_resp_p=5986) earliest=-30m latest=+5m | lookup known_range_hosts ip AS id_resp_h OUTPUT hostname AS host | eval host=lower(host), pair=ts . "|" . id_orig_h | stats list(pair) as winrm_opens by host ]
+  | eval winrm_opens=split(mvjoin(winrm_opens, " "), " ")
+  | eval cand=mvmap(winrm_opens, if(tonumber(mvindex(split(winrm_opens, "|"), 0)) <= _time+1 AND tonumber(mvindex(split(winrm_opens, "|"), 0)) >= _time-30, winrm_opens, null()))
+  | eval open_ip=mvindex(split(mvindex(mvsort(cand), -1), "|"), 1)
+  | join type=left host user_sid [ search index=windows EventCode=4624 Logon_Type=3 earliest=-30m latest=+5m | rex field=ComputerName "(?<host>[^.]+)" | rex field=_raw "New Logon:\s+Security ID:\s+(?<user_sid>\S+)\s+Account Name:\s+(?<sid_user>[^\r\n]+?)\s*[\r\n]" | eval host=lower(host) | stats latest(sid_user) as sid_user by host user_sid ]
+  | eval attacker_ip=coalesce(attacker_ip, open_ip), user=coalesce(user, sid_user, user_sid)
+  | where isnotnull(attacker_ip) AND attacker_ip!="10.0.2.1"
   | stats count by attacker_ip host user
   | `normalize_host(host)`
   | `normalize_user(user)`
@@ -43,6 +53,21 @@ known_false_positives: >-
   No other legitimate WinRM usage exists in this range day-to-day (no
   configuration-management tooling polls over WinRM here) -- revisit if
   that changes.
+changes_2026_10_03: >-
+  Was blind on dc1 and sql1. A netexec WinRM command against dc1 from
+  john-kali produced no alert: on those two Windows Server 2016 hosts (build
+  14393) WinRM/Operational event 91 is written with no event data at all, so
+  its message reads "Creating WSMan shell on server with ResourceUri: %1"
+  with no account or clientIP (checked on the hosts with Get-WinEvent: 0 of
+  ~20 recent 91s had data on dc1/sql1, all of them did on the 2019/2022/
+  Windows 11 hosts). The WinRM logon's 4624 has no source address either. For
+  those events the client is now the latest WinRM (5985/5986) connection
+  opened to the host in the 30s before the 91, from Zeek's `conn_open` log
+  (which now includes the WinRM ports, ~50 KB/day, in Splunk in under a
+  second), and the account is the 91's Sid resolved through that host's
+  network 4624. This is a time join, like LDAP Query's ADWS branch: two
+  different clients opening WinRM sessions to the same host within the same
+  few seconds could be confused. Hosts whose 91 has the clientIP still use it.
 throttle: [attacker_ip, host, user]
 changes_2026_09_30: >-
   One row per attacker, host and user (the minute bucket is gone). Runs
@@ -53,6 +78,11 @@ changes_2026_09_30: >-
   ~1 min) was never evaluated. Each result row is its own alert, throttled
   for 5m on the `throttle` fields.
 verification:
+  reverification_2026_10_03: >-
+    netexec winrm 10.0.2.2 -u Administrator -x 'net user user password
+    /domain' from john-kali: before the conn_open join, no alert (dc1's 91
+    is empty); after, fired with 192.168.1.11 / dc1 / Administrator ~11s
+    after the command.
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: john-kali (VM 611, 192.168.1.11)
