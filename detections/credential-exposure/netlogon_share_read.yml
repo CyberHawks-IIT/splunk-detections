@@ -1,7 +1,7 @@
 name: NETLOGON Share Read
 id: credential-exposure-netlogon-share-read
-version: 3
-date: '2026-09-30'
+version: 4
+date: '2026-10-04'
 status: production
 category: credential-exposure
 description: >-
@@ -10,10 +10,16 @@ description: >-
   cleartext credentials. NETLOGON only ever holds logon scripts, not
   general-purpose files, and machine accounts don't execute user logon
   scripts, so a real account reading anything there at all is the signal.
+  Fires only on a read of a file inside NETLOGON, not on access to the share
+  itself (enumerating shares, listing the root) -- so tooling aimed at SYSVOL
+  or any other share doesn't fire it. Reading the same script through
+  SYSVOL's path to it (`SYSVOL\cyberhawks.lab\scripts\`) is a SYSVOL read
+  and fires SYSVOL Share Read instead.
 data_source:
-  - Windows Events -- 5145, Share Name = \\*\NETLOGON
+  - Windows Events -- 5145, Share Name = \\*\NETLOGON, a granted read (Access Mask bit 0x1) below the share root
 search: |-
   index=windows EventCode=5145 Share_Name="\\\\*\\NETLOGON" `detection_window`
+  | `share_content_read`
   | where NOT match(Account_Name, "\$$")
   | stats values(Relative_Target_Name) as files values(ComputerName) as host by Source_Address
   | rename Source_Address as attacker_ip
@@ -37,6 +43,17 @@ known_false_positives: >-
   ($-suffixed) are excluded on principle even though none were observed --
   they have no legitimate reason to read a per-user logon script.
 throttle: [attacker_ip]
+changes_2026_10_04: >-
+  Made independent of SYSVOL Share Read. It fired on any 5145 against the
+  share, and `netexec` (e.g. its gpp_password run against SYSVOL, or a plain
+  `--shares`) checks every share's ROOT (`Relative_Target_Name` "\") on the
+  way -- in the retained data every NETLOGON fire was one of those root
+  checks, never a script read. Now filtered by `share_content_read`
+  (macros.conf): below the root, granted, ReadData requested, not a
+  delete-open (netexec's write test opens a temp folder with 0x1F01FF, which
+  includes ReadData). Read bits come from the Access Mask, not `Accesses`,
+  because Splunk extracts only the first listed access (a `smbclient get` is
+  0x120089 and shows as Accesses=READ_CONTROL).
 changes_2026_09_30: >-
   One row per source (the minute bucket is gone). Runs every minute over
   the events indexed in the previous minute (`detection_window`), so an
@@ -46,6 +63,16 @@ changes_2026_09_30: >-
   evaluated. Each result row is its own alert, throttled for 5m on the
   `throttle` fields.
 verification:
+  reverification_2026_10_04: >-
+    Live from john-kali (192.168.1.11) as dsmith against dc1, each step 20s
+    apart: `netexec smb --shares`; smbclient `ls` of NETLOGON's root;
+    smbclient `get MapDrives.ps1` from NETLOGON; smbclient `get
+    cyberhawks.lab\scripts\MapDrives.ps1` from SYSVOL. NETLOGON Share Read
+    fired exactly once, 4s after the NETLOGON get (host=dc1,
+    files=MapDrives.ps1); the share enumeration, root listing and SYSVOL get
+    did not fire it. Then (throttle expired) netexec's gpp_password module,
+    which checks every share's root before spidering SYSVOL -- the run that
+    used to fire this detection -- did not fire it.
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: john-kali (VM 611, 192.168.1.11)

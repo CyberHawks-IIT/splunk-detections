@@ -1,21 +1,36 @@
 name: SYSVOL Share Read
 id: credential-exposure-sysvol-share-read
-version: 3
-date: '2026-09-30'
+version: 4
+date: '2026-10-04'
 status: production
 category: credential-exposure
 description: >-
-  A named (non-machine) account reading a Group Policy Preferences
-  `Groups.xml` file off SYSVOL -- in this range, the "Workstation Local
-  Admin Reset" GPO's Local Users and Groups preference, which contains an
-  encrypted `cpassword` that decrypts with Microsoft's long-published,
-  fixed AES key to a real password.
+  A named (non-machine) account reading files inside a DC's SYSVOL share.
+  In this range SYSVOL holds two real secrets: the "Workstation Local Admin
+  Reset" GPO's Group Policy Preferences `Groups.xml`, whose `cpassword`
+  decrypts with Microsoft's long-published, fixed AES key to a real
+  password, and (under `cyberhawks.lab\scripts\`, the folder NETLOGON
+  shares) skumar's logon script `MapDrives.ps1` with cleartext credentials.
+  Group Policy clients read SYSVOL as the machine account (since MS16-072
+  even for user policy), so a named account reading inside it is the
+  signal. Fires only on reads below the share root, not on access to the
+  share itself (enumerating shares, listing the root), so tooling aimed at
+  NETLOGON or any other share doesn't fire it, and a NETLOGON read fires
+  NETLOGON Share Read instead. 5145 can't tell a file from a folder, so
+  listing a subfolder counts as a read; `files` keeps only the deepest
+  paths read (a folder is dropped when something under it was read), so a
+  spider's walk collapses to the files it reached plus any leaf folders.
 data_source:
-  - Windows Events -- 5145, Share Name = \\*\SYSVOL, Relative Target Name matching *Groups.xml
+  - Windows Events -- 5145, Share Name = \\*\SYSVOL, a granted read (Access Mask bit 0x1) below the share root
 search: |-
-  index=windows EventCode=5145 Share_Name="\\\\*\\SYSVOL" Relative_Target_Name="*Groups.xml" `detection_window`
+  index=windows EventCode=5145 Share_Name="\\\\*\\SYSVOL" `detection_window`
+  | `share_content_read`
   | where NOT match(Account_Name, "\$$")
   | stats values(Relative_Target_Name) as files values(ComputerName) as host by Source_Address
+  | eval all_paths=files
+  | mvexpand files
+  | where isnull(mvmap(all_paths, if(substr(all_paths, 1, len(files)+1)==files . "\\", 1, null())))
+  | stats values(files) as files values(host) as host by Source_Address
   | rename Source_Address as attacker_ip
   | `normalize_host(host)`
   | table attacker_ip host files
@@ -36,8 +51,24 @@ known_false_positives: >-
   harmless investigation-time noise from this session, not a real
   workstation refresh, but worth noting since it shows the file genuinely
   gets touched by non-attacker activity and the account-name exclusion is
-  doing real work, not just defensive boilerplate.
+  doing real work, not just defensive boilerplate. Broadening to any SYSVOL
+  file (2026-10-04) adds admin GPO tooling generally: on 2026-10-04 13:17 an
+  Administrator editing this GPO on dc1 itself (GPMC, source the DC's own
+  link-local fe80:: address) opened Groups.xml and GPT.INI for read/write
+  and would fire; the old Groups.xml-only search fired on it too. No other
+  named-account SYSVOL reads in the retained baseline besides the attacker.
 throttle: [attacker_ip]
+changes_2026_10_04: >-
+  Made independent of NETLOGON Share Read and widened from `Groups.xml` only
+  to any read inside SYSVOL, so the share fires on what's read in it, not on
+  one filename. Before, reading `cyberhawks.lab\scripts\MapDrives.ps1`
+  through SYSVOL fired neither detection. Uses the same
+  `share_content_read` filter as NETLOGON Share Read (below the root,
+  granted, ReadData requested from the Access Mask, not a delete-open), which
+  also drops writes: the old search fired on any Groups.xml 5145, including
+  write-only ones. Added the deepest-path pruning so a recursive spider
+  (netexec's gpp_password walks ~22 folders) doesn't crowd Groups.xml out of
+  Discord's 1024-character field limit.
 changes_2026_09_30: >-
   One row per source (the minute bucket is gone). Runs every minute over
   the events indexed in the previous minute (`detection_window`), so an
@@ -47,6 +78,17 @@ changes_2026_09_30: >-
   evaluated. Each result row is its own alert, throttled for 5m on the
   `throttle` fields.
 verification:
+  reverification_2026_10_04: >-
+    Live from john-kali (192.168.1.11) as dsmith against dc1, each step 20s
+    apart: `netexec smb --shares`; smbclient `ls` of NETLOGON's root;
+    smbclient `get MapDrives.ps1` from NETLOGON (none of the three fired
+    SYSVOL); smbclient `get cyberhawks.lab\scripts\MapDrives.ps1` from
+    SYSVOL fired once, ~14s later, files=`cyberhawks.lab\scripts\MapDrives.ps1`.
+    Then (throttle expired) netexec's `-M gpp_password` (checks every share's
+    root, then spiders SYSVOL, ~22 paths): SYSVOL Share Read fired once 8s
+    after the run (5 later runs suppressed), posted to Discord (HTTP 204),
+    with `files` pruned to 8 paths (Groups.xml plus the leaf folders the
+    spider listed); NETLOGON Share Read did not fire.
   date: '2026-09-27'
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: john-kali (VM 611, 192.168.1.11)
