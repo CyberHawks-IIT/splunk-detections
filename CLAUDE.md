@@ -413,7 +413,15 @@ stage. The repo/live state is authoritative; this is the "why".
   cores / 16 GB** (Proxmox CT 510; vm-templates `debian-containers.md`), and
   internal indexes (`_audit`/`_internal`/`_introspection`) got size caps in
   defense-tooling's `dt_detection_content_indexes.conf` because ~200 runs/min
-  write a lot of audit/scheduler data.
+  write a lot of audit/scheduler data. **Those caps did not actually enforce**
+  (data sat in hot buckets, which Splunk never freezes); the disk filled on
+  2026-10-08 and Splunk stopped running every detection for ~26 h. Fixed
+  2026-10-09: every index now rolls small buckets daily, with retention and a
+  total disk budget set by defense-tooling `splunk_indexer` role variables
+  (`splunk_index_storage_mb`, `splunk_data_retention_days`,
+  `splunk_internal_retention_days`). See defense-tooling CLAUDE.md "Indexer
+  disk full". If you add a detection that looks back further than 7 days,
+  raise that role's retention assert to match.
 - **Ingestion delays cut at the source.** (1) **Zeek** UDP/ICMP flows were held
   for the 1-min `udp/icmp_inactivity_timeout` before conn.log wrote them (~62 s
   for Ping Sweep, Name Resolution Poisoning, UDP scans); dropped to 5 s, then
