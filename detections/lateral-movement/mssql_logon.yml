@@ -1,7 +1,7 @@
 name: 'Lateral Movement: MSSQL'
 id: lateral-movement-mssql
-version: 1
-date: '2026-10-02'
+version: 2
+date: '2026-10-17'
 status: production
 category: lateral-movement
 description: >-
@@ -23,7 +23,7 @@ search: |-
   | eval event_epoch=strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z")
   | where isnotnull(event_epoch) AND _time - event_epoch <= 600
   | eval host=replace(source, "_mssql_audit", ""), attacker_ip=client_address, user=server_principal_name
-  | where isnotnull(attacker_ip) AND attacker_ip!="local machine" AND attacker_ip!="10.0.2.1" AND NOT (user="svc-sqlmonitor" AND attacker_ip="10.0.10.2")
+  | where isnotnull(attacker_ip) AND attacker_ip!="local machine" AND attacker_ip!="10.0.2.1" AND NOT (user="svc-sqlmonitor" AND attacker_ip="10.0.10.2") AND NOT (user="svc-web" AND attacker_ip="10.0.2.5")
   | lookup known_range_hosts ip AS attacker_ip OUTPUT hostname AS client_host
   | eval client_host=lower(client_host)
   | join type=left client_host [ search index=mssql sourcetype=mssql_xe_text event_name=oledb_provider_information earliest=-30m latest=+5m | eval client_host=lower(replace(source, "_mssql_xe_text", "")), link=floor(strptime(substr(event_time, 1, 19) . " +0000", "%Y-%m-%d %H:%M:%S %z")) . "|" . lower(linked_server_name) | stats values(link) as links by client_host | eval links=mvjoin(links, ";") ]
@@ -46,7 +46,12 @@ known_false_positives: >-
   Baseline (24h before this detection was written): the only logins from
   another machine were DB Connect's own monitoring login (`svc-sqlmonitor`
   from the indexer, 10.0.10.2, excluded by account AND address so the same
-  account from anywhere else still fires), sql1's linked-server login to sql2
+  account from anywhere else still fires), the CyberHawks portal web app's
+  own login (`svc-web` from the `web` host, 10.0.2.5, added 2026-10-17 when
+  the portal went live; excluded by account AND address the same way, so the
+  leaked `svc-web` credential from `Web.config.bak` used from any other host
+  still fires, as does any other account from `web`), sql1's linked-server
+  login to sql2
   (`sa` from 10.0.2.6, see below), and real test activity. Logins the server
   makes to itself ("local machine": SQL Agent, SQLTELEMETRY, a local sqlcmd)
   are not lateral movement and are skipped, as is this project's control host
@@ -63,6 +68,21 @@ known_false_positives: >-
   not collected.
 throttle: [attacker_ip, host, user]
 verification:
+  reverification_2026_10_17_svc_web: >-
+    Added the `svc-web`@10.0.2.5 exclusion when the CyberHawks portal went
+    live on `web` (it connects to sql1 as the `svc-web` SQL login, per
+    web-app SITE_PLAN / Web.config.bak). Confirmed live against indexed data:
+    over 24h, sql1 had 107 `svc-web` logins from 10.0.2.5 (the portal) that
+    the unpatched search returned as rows -- the FP this fixes. Ran the search
+    body with and without the new predicate over the same window: the old
+    version returned `svc-web/10.0.2.5` (107) plus a real `CYBERHAWKS\user`
+    login from 192.168.1.121; the new version dropped only the portal row and
+    kept the `CYBERHAWKS\user` login. For the "still fires off-box" half,
+    replayed the leaked `svc-web` credential from the test box (10.0.2.10, not
+    the web host) via impacket mssqlclient -- the new search returned
+    `svc-web/10.0.2.10`, confirming the exclusion is scoped to account AND the
+    web host's IP (a stolen `svc-web` cred used from anywhere else still
+    alerts, as does any other account from `web`).
   date: '2026-10-02'
   method: Live attack execution against the cyberhawks.lab range
   attacker_source: john-kali (VM 611, 192.168.1.11)
