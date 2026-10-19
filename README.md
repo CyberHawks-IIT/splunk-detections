@@ -30,6 +30,9 @@ Splunk instance. One saved search per attacker behavior, each one written and
   holds the SPL plus a `verification` block recording exactly how it was
   live-fire tested. See any existing file for the schema (`name`, `id`,
   `search`, `description`, `known_false_positives`, `embed`, and so on).
+- **[detections/README.md](detections/README.md)** is a catalog of every
+  implemented detection — name, data source, output fields, throttle key, and
+  explicit exclusions — with a summary table and per-detection notes.
 - **`build/build_app.py`** compiles those YAMLs into
   `app/default/savedsearches.conf`. That file is generated, never hand-edited.
 - **`app/`** is the deployable Splunk app that defense-tooling drops into
